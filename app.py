@@ -1,0 +1,505 @@
+import os
+import time
+import streamlit as st
+from utils.db import load_db, save_db
+from utils.classifier import infer_category, GEMINI_CALL_DELAY
+from utils.matcher import semantic_score
+from utils.github_fetcher import fetch_repo_info
+from utils.github_search import search_github
+from utils.reddit_search import search_reddit
+
+# ── 상수 ─────────────────────────────────────────────────────────────────────
+GITHUB_USER = "workcompany"
+GITHUB_REPO = "opensource-match-program"
+GITHUB_URL  = f"https://github.com/{GITHUB_USER}/{GITHUB_REPO}"
+
+st.set_page_config(
+    page_title="OpenSource App Matchmaker",
+    page_icon="🔍",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+st.markdown("""
+<style>
+.main .block-container { padding-top: 2rem; max-width: 960px; }
+.app-card {
+    border: 1px solid #e5e7eb; border-radius: 12px;
+    padding: 1.1rem 1.3rem; margin-bottom: 0.75rem; background: white;
+}
+.app-card:hover { border-color: #9ca3af; }
+.gh-card {
+    border: 1px solid #d1fae5; border-radius: 12px;
+    padding: 1rem 1.2rem; margin-bottom: 0.65rem; background: #f0fdf4;
+}
+.rd-card {
+    border: 1px solid #fee2e2; border-radius: 12px;
+    padding: 1rem 1.2rem; margin-bottom: 0.65rem; background: #fff7f7;
+}
+.score-bar  { height: 4px; background: #f3f4f6; border-radius: 2px; margin-top: 8px; }
+.score-fill { height: 4px; border-radius: 2px; background: #111827; }
+.badge { display:inline-block;font-size:11px;padding:2px 9px;border-radius:20px;font-weight:500;margin-right:4px; }
+.badge-eng  { background:#E6F1FB;color:#0C447C; }
+.badge-rob  { background:#EEEDFE;color:#3C3489; }
+.badge-ai   { background:#E1F5EE;color:#085041; }
+.badge-mfg  { background:#FAECE7;color:#712B13; }
+.badge-util { background:#FAEEDA;color:#633806; }
+.src-gh  { display:inline-block;font-size:10px;padding:1px 7px;border-radius:10px;background:#dcfce7;color:#166534;font-weight:500; }
+.src-rd  { display:inline-block;font-size:10px;padding:1px 7px;border-radius:10px;background:#fee2e2;color:#991b1b;font-weight:500; }
+.src-db  { display:inline-block;font-size:10px;padding:1px 7px;border-radius:10px;background:#eff6ff;color:#1e40af;font-weight:500; }
+</style>
+""", unsafe_allow_html=True)
+
+BADGE_MAP = {
+    "Engineering": "badge-eng", "Robotics": "badge-rob",
+    "AI / ML": "badge-ai",     "Manufacturing": "badge-mfg",
+    "Utility": "badge-util",
+}
+CAT_TREE = {
+    "Engineering": {
+        "Manufacturing":    ["MIM / Powder Metallurgy", "Mold Design", "CNC / Machining"],
+        "CFD / Simulation": ["OpenFOAM", "FEA", "Thermal Analysis"],
+        "Materials Science":["Shrinkage Prediction", "Phase Diagram", "Alloy Design"],
+    },
+    "Robotics": {
+        "Locomotion Control": ["Bipedal Walking", "Quadruped Gait", "Wheeled Navigation"],
+        "Simulation":         ["PyBullet", "MuJoCo", "ROS Integration"],
+        "Perception":         ["SLAM", "Object Detection", "Sensor Fusion"],
+    },
+    "AI / ML": {
+        "NLP":            ["LLM Wrapper", "RAG Pipeline", "Text Classification"],
+        "Automation":     ["LangChain", "Workflow", "Zapier Integration"],
+        "Computer Vision":["Image Segmentation", "Pose Estimation"],
+    },
+    "Utility": {
+        "Data Tools": ["File Converter", "Scraper", "Dashboard"],
+        "DevOps":     ["GitHub Actions", "CI/CD", "Monitoring"],
+    },
+}
+
+# ── 세션 상태 초기화 ─────────────────────────────────────────────────────────
+if "last_api_call" not in st.session_state:
+    st.session_state.last_api_call = 0.0
+if "analyze_result" not in st.session_state:
+    st.session_state.analyze_result = None
+if "search_results" not in st.session_state:
+    st.session_state.search_results = {}   # query → {db, github, reddit}
+if "last_query" not in st.session_state:
+    st.session_state.last_query = ""
+
+
+# ── 유틸 함수 ────────────────────────────────────────────────────────────────
+def cooldown_remaining() -> float:
+    return max(0.0, GEMINI_CALL_DELAY - (time.time() - st.session_state.last_api_call))
+
+
+def render_card(app: dict, score: int | None = None):
+    bc = BADGE_MAP.get(app.get("cat_major", ""), "badge-util")
+    tags_html = "".join(
+        f'<span style="font-size:10px;padding:2px 6px;border-radius:10px;'
+        f'background:#f3f4f6;color:#6b7280;margin-right:3px">{t}</span>'
+        for t in app.get("tags", [])[:5]
+    )
+    score_html = score_right = ""
+    if score is not None:
+        pct = min(100, score * 4)
+        score_html  = f'<div class="score-bar"><div class="score-fill" style="width:{pct}%"></div></div>'
+        score_right = (f'<span style="font-size:18px;font-weight:500">{score}</span>'
+                       f'<span style="font-size:11px;color:#9ca3af"> pts</span>')
+    else:
+        score_right = f'<span style="font-size:12px;color:#9ca3af">★ {app.get("stars", 0)}</span>'
+
+    repo = app.get("repo", "")
+    repo_link = (
+        f'<a href="https://github.com/{repo}" target="_blank" '
+        f'style="font-size:12px;color:#6b7280;text-decoration:none">{repo} ↗</a>'
+    ) if repo else ""
+
+    st.markdown(f"""
+    <div class="app-card">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px">
+        <div>
+          <span class="src-db">내 DB</span>&nbsp;
+          <span style="font-size:14px;font-weight:500;color:#111827">{app["name"]}</span>
+          <div style="margin-top:3px">{repo_link}</div>
+        </div>
+        <div style="text-align:right">{score_right}
+          <div style="margin-top:3px"><span class="badge {bc}">{app.get("cat_major","")}</span></div>
+        </div>
+      </div>
+      <div style="font-size:13px;color:#4b5563;line-height:1.6;margin-bottom:8px">{app["summary"]}</div>
+      <div style="font-size:11px;color:#9ca3af;margin-bottom:6px">
+        {app.get("cat_major","")} › {app.get("cat_mid","")} › {app.get("cat_minor","")}
+      </div>
+      {tags_html}{score_html}
+    </div>
+    """, unsafe_allow_html=True)
+
+
+def render_github_card(item: dict):
+    topics_html = "".join(
+        f'<span style="font-size:10px;padding:1px 7px;border-radius:10px;'
+        f'background:#dcfce7;color:#166534;margin-right:3px">{t}</span>'
+        for t in item.get("topics", [])[:6]
+    )
+    st.markdown(f"""
+    <div class="gh-card">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:5px">
+        <div>
+          <span class="src-gh">GitHub</span>&nbsp;
+          <a href="{item['url']}" target="_blank"
+             style="font-size:14px;font-weight:500;color:#111827;text-decoration:none">
+            {item['repo']} ↗
+          </a>
+        </div>
+        <span style="font-size:12px;color:#6b7280">★ {item['stars']} · {item.get('lang','')}</span>
+      </div>
+      <div style="font-size:13px;color:#374151;line-height:1.5;margin-bottom:8px">{item['summary']}</div>
+      <div style="font-size:11px;color:#9ca3af;margin-bottom:5px">업데이트: {item.get('updated','')}</div>
+      {topics_html}
+    </div>
+    """, unsafe_allow_html=True)
+
+
+def render_reddit_card(item: dict):
+    st.markdown(f"""
+    <div class="rd-card">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:5px">
+        <div>
+          <span class="src-rd">Reddit</span>&nbsp;
+          <span style="font-size:11px;color:#9ca3af">{item.get('subreddit','')}</span>
+        </div>
+        <span style="font-size:11px;color:#9ca3af">👍 {item.get('score',0)} · 💬 {item.get('comments',0)}</span>
+      </div>
+      <a href="{item['url']}" target="_blank"
+         style="font-size:13px;font-weight:500;color:#111827;text-decoration:none;line-height:1.5">
+        {item['title']} ↗
+      </a>
+      <div style="font-size:12px;color:#6b7280;margin-top:5px;line-height:1.5">{item.get('summary','')}</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+
+# ── Sidebar ───────────────────────────────────────────────────────────────────
+with st.sidebar:
+    st.markdown("### 🔍 App Matchmaker")
+    st.caption("오픈소스 무료 앱을 찾고 등록하세요")
+    st.markdown(f"[📂 GitHub 저장소]({GITHUB_URL})")
+    st.divider()
+    page = st.radio(
+        "메뉴",
+        ["🏠 홈", "➕ 저장소 등록", "🔎 앱 검색", "📂 카테고리 탐색", "📋 전체 목록"],
+        label_visibility="collapsed",
+    )
+    st.divider()
+    db = load_db()
+    st.metric("등록된 앱", len(db))
+    cats: dict[str, int] = {}
+    for _a in db:
+        cats[_a["cat_major"]] = cats.get(_a["cat_major"], 0) + 1
+    for _c, _n in cats.items():
+        st.caption(f"• {_c}: {_n}개")
+
+    st.divider()
+    # API 상태
+    has_gemini = bool(os.environ.get("GEMINI_API_KEY"))
+    has_gh_token = bool(os.environ.get("GITHUB_TOKEN"))
+    rem = cooldown_remaining()
+
+    st.caption("**API 상태**")
+    if has_gemini:
+        st.caption(f"{'⏳' if rem > 0 else '✅'} Gemini {'쿨다운 ' + str(int(rem)) + '초' if rem > 0 else '준비됨'}")
+    else:
+        st.caption("⚠️ Gemini 키 없음 (키워드 분류)")
+    st.caption(f"{'🔑' if has_gh_token else '🔓'} GitHub API {'토큰 인증' if has_gh_token else '비인증 (10 req/min)'}")
+    st.caption("🟠 Reddit API 공개 (인증 불필요)")
+
+db = load_db()
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 홈
+# ═══════════════════════════════════════════════════════════════════════════════
+if page == "🏠 홈":
+    st.title("🔍 OpenSource App Matchmaker")
+    st.markdown(
+        "개발자는 **포트폴리오**를, 사용자는 **무료 앱**을 찾는 오픈소스 매칭 플랫폼.  \n"
+        f"[GitHub: {GITHUB_USER}/{GITHUB_REPO}]({GITHUB_URL})"
+    )
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("등록된 앱", len(db))
+    c2.metric("검색 소스", "3가지")
+    c3.metric("GitHub Search", "무료")
+    c4.metric("Reddit Search", "무료")
+
+    st.divider()
+    st.subheader("빠른 검색")
+    quick = st.text_input("앱이 필요한 상황을 자연어로 입력하세요",
+                          placeholder="예: 이족보행 로봇 균형 제어 파이썬")
+    if quick:
+        results = sorted(db, key=lambda a: semantic_score(a, quick), reverse=True)[:3]
+        for app in results:
+            render_card(app, score=semantic_score(app, quick))
+
+    st.divider()
+    st.subheader("최근 등록된 앱")
+    for app in list(reversed(db))[:3]:
+        render_card(app)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 저장소 등록
+# ═══════════════════════════════════════════════════════════════════════════════
+elif page == "➕ 저장소 등록":
+    st.title("➕ 저장소 / 앱 등록")
+    tab1, tab2 = st.tabs(["GitHub 저장소 URL", "직접 입력"])
+
+    with tab1:
+        repo_input = st.text_input("저장소", placeholder=f"예: {GITHUB_USER}/{GITHUB_REPO}")
+        rem = cooldown_remaining()
+        if rem > 0:
+            st.info(f"⏳ Gemini 쿨다운 — {rem:.0f}초 후 분석 가능")
+
+        if st.button("🔍 분석 시작", type="primary", disabled=rem > 0):
+            if repo_input:
+                st.session_state.analyze_result = None
+                with st.spinner("README / 코드 가져오는 중..."):
+                    info = fetch_repo_info(repo_input)
+                with st.spinner(f"Gemini 분류 중... (최대 {GEMINI_CALL_DELAY + 10}초)"):
+                    cat = infer_category(info["content"], repo_input)
+                    st.session_state.last_api_call = time.time()
+                st.session_state.analyze_result = {"info": info, "cat": cat, "repo": repo_input}
+
+        res = st.session_state.analyze_result
+        if res:
+            info, cat, repo_cached = res["info"], res["cat"], res["repo"]
+            model_used = cat.get("_model_used", "keyword")
+            st.success(f"분석 완료! (모델: `{model_used}`)")
+
+            c1, c2 = st.columns(2)
+            with c1:
+                st.markdown(f"**앱 이름:** {info['name']}")
+                st.markdown(f"**언어:** {info.get('lang','Python')} · ★ {info.get('stars',0)}")
+                st.markdown(f"**README:** {'✅ 있음' if info.get('has_readme') else '❌ 없음 (코드 분석)'}")
+                st.markdown(f"**설명:** {cat['summary']}")
+            with c2:
+                st.markdown(f"**대분류:** {cat['major']}")
+                st.markdown(f"**중분류:** {cat['mid']}")
+                st.markdown(f"**소분류:** {cat['minor']}")
+                st.progress(cat["confidence"] / 100, text=f"신뢰도 {cat['confidence']}%")
+
+            if model_used == "gemini-2.0-flash-lite":
+                st.info("ℹ️ gemini-2.0-flash 할당량 초과 → lite 모델로 폴백")
+            elif model_used == "exhausted":
+                st.warning("⚠️ 모든 Gemini 모델 할당량 초과. 키워드 분류 결과입니다.")
+
+            if any(a["repo"] == repo_cached for a in db):
+                st.warning("이미 등록된 저장소입니다.")
+            elif st.button("✅ DB에 등록", type="primary"):
+                db.append({
+                    "id": len(db) + 1, "name": info["name"], "repo": repo_cached,
+                    "owner": repo_cached.split("/")[0], "summary": cat["summary"],
+                    "cat_major": cat["major"], "cat_mid": cat["mid"], "cat_minor": cat["minor"],
+                    "lang": info.get("lang", "Python"), "stars": info.get("stars", 0),
+                    "tags": cat.get("tags", []), "has_readme": info.get("has_readme", False),
+                })
+                save_db(db)
+                st.session_state.analyze_result = None
+                st.success(f"'{info['name']}' 등록 완료!")
+                st.rerun()
+
+    with tab2:
+        with st.form("manual"):
+            name     = st.text_input("앱 이름 *")
+            repo     = st.text_input("GitHub 저장소 (선택)", placeholder="owner/repo")
+            summary  = st.text_area("앱 설명 *")
+            c1, c2, c3 = st.columns(3)
+            major    = c1.selectbox("대분류", list(CAT_TREE.keys()) + ["Other"])
+            mid      = c2.text_input("중분류")
+            minor    = c3.text_input("소분류")
+            lang     = st.selectbox("언어", ["Python", "JavaScript", "TypeScript", "Other"])
+            tags_raw = st.text_input("태그 (쉼표 구분)")
+            if st.form_submit_button("등록", type="primary") and name and summary:
+                db.append({
+                    "id": len(db) + 1, "name": name, "repo": repo,
+                    "owner": repo.split("/")[0] if "/" in repo else "",
+                    "summary": summary, "cat_major": major, "cat_mid": mid, "cat_minor": minor,
+                    "lang": lang, "stars": 0,
+                    "tags": [t.strip() for t in tags_raw.split(",") if t.strip()],
+                    "has_readme": False,
+                })
+                save_db(db)
+                st.success(f"'{name}' 등록 완료!")
+                st.rerun()
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 앱 검색 — 3중 소스 통합
+# ═══════════════════════════════════════════════════════════════════════════════
+elif page == "🔎 앱 검색":
+    st.title("🔎 앱 검색 & 매칭")
+    st.caption("내 DB + GitHub Search API + Reddit — 3가지 소스를 동시에 검색합니다")
+
+    query = st.text_input(
+        "찾고 싶은 앱을 자연어로 설명하세요",
+        placeholder="예: 이족보행 로봇 균형 제어 파이썬으로 된 것",
+    )
+    examples = [
+        "MIM 수축률 예측", "이족보행 균형 제어",
+        "OpenFOAM 유동 해석", "몰드 설계 최적화",
+        "로봇 시뮬레이션 PyBullet", "RAG pipeline python",
+    ]
+    cols = st.columns(len(examples))
+    for i, eq in enumerate(examples):
+        if cols[i].button(eq, key=f"eq{i}"):
+            query = eq
+
+    if not query:
+        st.stop()
+
+    # ── 검색 버튼 (GitHub + Reddit은 네트워크 요청이므로 버튼으로 트리거) ──
+    col_btn, col_opt = st.columns([2, 5])
+    with col_btn:
+        do_search = st.button("🔍 전체 검색", type="primary")
+    with col_opt:
+        use_github = st.checkbox("GitHub Search 포함", value=True)
+        use_reddit = st.checkbox("Reddit 포함", value=True)
+
+    # 쿼리가 바뀌면 캐시 초기화
+    if query != st.session_state.last_query:
+        st.session_state.search_results = {}
+        st.session_state.last_query = query
+
+    # 검색 실행
+    if do_search or st.session_state.search_results:
+        if do_search:
+            with st.spinner("3가지 소스에서 동시 검색 중..."):
+                # 1) 내 DB
+                db_scored = sorted(db, key=lambda a: semantic_score(a, query), reverse=True)
+
+                # 2) GitHub Search API
+                gh_results = search_github(query, max_results=8) if use_github else []
+
+                # 3) Reddit
+                rd_results = search_reddit(query, max_results=6) if use_reddit else []
+
+            st.session_state.search_results = {
+                "db": db_scored,
+                "github": gh_results,
+                "reddit": rd_results,
+            }
+
+        cached = st.session_state.search_results
+        db_scored  = cached.get("db", [])
+        gh_results = cached.get("github", [])
+        rd_results = cached.get("reddit", [])
+
+        # ── 탭으로 결과 분리 ──────────────────────────────────────────────
+        db_match = sum(1 for a in db_scored if semantic_score(a, query) > 0)
+        gh_ok    = [r for r in gh_results if "error" not in r]
+        rd_ok    = [r for r in rd_results if "error" not in r]
+
+        tab_db, tab_gh, tab_rd = st.tabs([
+            f"📋 내 DB ({db_match}개 매칭)",
+            f"🐙 GitHub ({len(gh_ok)}개)",
+            f"🟠 Reddit ({len(rd_ok)}개)",
+        ])
+
+        # ── 내 DB 탭 ─────────────────────────────────────────────────────
+        with tab_db:
+            if db_match == 0:
+                st.info("DB에 매칭되는 앱이 없습니다. GitHub 탭을 확인하거나 저장소를 등록해 보세요.")
+            for app in db_scored:
+                s = semantic_score(app, query)
+                render_card(app, score=s)
+
+        # ── GitHub 탭 ────────────────────────────────────────────────────
+        with tab_gh:
+            if not use_github:
+                st.info("GitHub Search가 비활성화되어 있습니다.")
+            elif not gh_ok:
+                err = gh_results[0].get("error", "결과 없음") if gh_results else "결과 없음"
+                st.warning(f"GitHub 검색 결과 없음: {err}")
+            else:
+                st.caption(f"GitHub에서 '{query}' 관련 저장소 {len(gh_ok)}개 발견")
+                for item in gh_ok:
+                    render_github_card(item)
+                    # 내 DB에 없으면 등록 버튼 표시
+                    if not any(a["repo"] == item["repo"] for a in db):
+                        if st.button(f"+ DB에 등록", key=f"gh_add_{item['repo']}"):
+                            with st.spinner("분석 중..."):
+                                info = fetch_repo_info(item["repo"])
+                                cat  = infer_category(info["content"], item["repo"])
+                                st.session_state.last_api_call = time.time()
+                            db.append({
+                                "id": len(db) + 1,
+                                "name": info["name"], "repo": item["repo"],
+                                "owner": item["owner"], "summary": cat["summary"],
+                                "cat_major": cat["major"], "cat_mid": cat["mid"],
+                                "cat_minor": cat["minor"],
+                                "lang": item.get("lang", "Python"),
+                                "stars": item.get("stars", 0),
+                                "tags": cat.get("tags", []) + item.get("topics", [])[:3],
+                                "has_readme": info.get("has_readme", False),
+                            })
+                            save_db(db)
+                            st.success(f"'{info['name']}' 등록 완료!")
+                            st.rerun()
+
+        # ── Reddit 탭 ────────────────────────────────────────────────────
+        with tab_rd:
+            if not use_reddit:
+                st.info("Reddit 검색이 비활성화되어 있습니다.")
+            elif not rd_ok:
+                err = rd_results[0].get("error", "결과 없음") if rd_results else "결과 없음"
+                st.warning(f"Reddit 검색 결과 없음: {err}")
+            else:
+                st.caption(
+                    f"Reddit(r/opensource, r/Python, r/robotics 등)에서 "
+                    f"'{query}' 관련 포스트 {len(rd_ok)}개 발견"
+                )
+                for item in rd_ok:
+                    render_reddit_card(item)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 카테고리 탐색
+# ═══════════════════════════════════════════════════════════════════════════════
+elif page == "📂 카테고리 탐색":
+    st.title("📂 카테고리 탐색")
+    sel_major = st.selectbox("대분류", ["전체"] + list(CAT_TREE.keys()))
+
+    if sel_major == "전체":
+        cols = st.columns(2)
+        for i, (cat, subs) in enumerate(CAT_TREE.items()):
+            cnt = sum(1 for a in db if a["cat_major"] == cat)
+            with cols[i % 2]:
+                st.markdown(f"**{cat}** — 앱 {cnt}개")
+                for m in subs:
+                    mc = sum(1 for a in db if a["cat_mid"] == m)
+                    st.caption(f"  • {m} ({mc})")
+    else:
+        subs    = CAT_TREE[sel_major]
+        sel_mid = st.selectbox("중분류", ["전체"] + list(subs.keys()))
+        if sel_mid != "전체":
+            st.caption("소분류: " + " · ".join(subs[sel_mid]))
+        filtered = [a for a in db if a["cat_major"] == sel_major]
+        if sel_mid != "전체":
+            filtered = [a for a in filtered if a["cat_mid"] == sel_mid]
+        st.caption(f"{len(filtered)}개 앱")
+        for app in filtered:
+            render_card(app)
+        if not filtered:
+            st.info("아직 등록된 앱이 없습니다.")
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 전체 목록
+# ═══════════════════════════════════════════════════════════════════════════════
+elif page == "📋 전체 목록":
+    st.title("📋 전체 등록 앱")
+    sort_by = st.selectbox("정렬", ["등록 순 (최신)", "별점 순", "이름 순"])
+    if sort_by == "별점 순":
+        db_s = sorted(db, key=lambda a: a.get("stars", 0), reverse=True)
+    elif sort_by == "이름 순":
+        db_s = sorted(db, key=lambda a: a["name"])
+    else:
+        db_s = list(reversed(db))
+    st.caption(f"총 {len(db_s)}개")
+    for app in db_s:
+        render_card(app)
