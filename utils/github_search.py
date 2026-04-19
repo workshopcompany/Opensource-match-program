@@ -112,13 +112,82 @@ Output JSON:"""
 
 
 def _fallback_intent(user_query: str) -> dict:
-    """Gemini 없을 때 기본 fallback"""
+    """
+    Gemini 없을 때 기본 fallback.
+    한국어가 포함된 경우 영어 단어만 추출하고,
+    한국어 전용 쿼리는 도메인 키워드 사전으로 보완합니다.
+    """
+    import unicodedata
+
+    # 한글 포함 여부 판단
+    has_korean = any(unicodedata.category(c) == "Lo" and "\uAC00" <= c <= "\uD7A3" for c in user_query)
+
+    if not has_korean:
+        # 영어 쿼리: 그대로 사용
+        return {
+            "type": "other", "domain": "other",
+            "keywords": [user_query],
+            "topics": [], "awesome_keywords": [],
+        }
+
+    # 한국어 쿼리: 도메인 키워드 매핑으로 영어 변환 시도
+    KO_MAP = {
+        # 로보틱스
+        "이족보행": ["bipedal walking", "biped robot"],
+        "보행":     ["locomotion", "walking robot"],
+        "균형":     ["balance control", "stabilization"],
+        "제어":     ["control", "controller"],
+        "시뮬레이션": ["simulation", "simulator"],
+        "로봇":     ["robot", "robotics"],
+        "강화학습": ["reinforcement learning", "RL"],
+        # 공학
+        "유동":     ["fluid dynamics", "CFD"],
+        "해석":     ["analysis", "simulation"],
+        "열":       ["thermal", "heat transfer"],
+        "몰드":     ["mold design", "injection mold"],
+        "설계":     ["design optimization"],
+        "수축률":   ["shrinkage prediction"],
+        "분말":     ["powder metallurgy"],
+        # AI/ML
+        "파이프라인": ["pipeline"],
+        "분류":     ["classification"],
+        "탐지":     ["detection"],
+        "생성":     ["generation", "generative"],
+        # 일반
+        "파이썬":   ["python"],
+        "무료":     ["open source", "free"],
+        "자동":     ["automation", "automatic"],
+        "최적화":   ["optimization"],
+        "예측":     ["prediction"],
+        "학습":     ["training", "learning"],
+    }
+
+    matched_en: list[str] = []
+    for ko, en_list in KO_MAP.items():
+        if ko in user_query:
+            matched_en.extend(en_list)
+
+    # 영어 단어가 쿼리에 섞여 있으면 그것도 포함
+    en_words = [w for w in user_query.split() if all(ord(c) < 128 for c in w) and len(w) > 1]
+    matched_en.extend(en_words)
+
+    if not matched_en:
+        # 매핑 실패 시 원문 그대로 (최후 수단)
+        matched_en = [user_query]
+
+    # 조합해서 2~3개 키워드 문구 생성
+    keywords = []
+    if len(matched_en) >= 2:
+        keywords.append(" ".join(matched_en[:2]))
+        keywords.append(" ".join(matched_en[:3]) if len(matched_en) >= 3 else matched_en[0])
+    keywords.append(" ".join(matched_en))
+    keywords = list(dict.fromkeys(keywords))[:4]  # 중복 제거, 최대 4개
+
     return {
-        "type": "other",
-        "domain": "other",
-        "keywords": [user_query],
+        "type": "other", "domain": "other",
+        "keywords": keywords,
         "topics": [],
-        "awesome_keywords": [],
+        "awesome_keywords": matched_en[:1],
     }
 
 
