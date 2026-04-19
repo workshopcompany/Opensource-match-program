@@ -1,6 +1,7 @@
 import os
 import time
 import streamlit as st
+import streamlit.components.v1
 from utils.db import load_db, save_db
 from utils.classifier import infer_category, GEMINI_CALL_DELAY
 from utils.matcher import semantic_score
@@ -234,62 +235,76 @@ def render_card(app: dict, score: int | None = None):
 
 
 def render_github_card(item: dict):
-    is_awesome   = item.get("is_awesome", False)
-    card_class   = "gh-card awesome" if is_awesome else "gh-card"
-    src_tag      = '<span class="src-aw">⭐ Awesome List</span>' if is_awesome else '<span class="src-gh">GitHub</span>'
-    topics_html  = "".join(
-        f'<span style="font-size:10px;padding:1px 7px;border-radius:10px;'
-        f'background:#dcfce7;color:#166534;margin-right:3px">{t}</span>'
+    import html as _html
+    is_awesome  = item.get("is_awesome", False)
+    bg_color    = "#fffbeb" if is_awesome else "#f0fdf4"
+    border_color= "#fde68a" if is_awesome else "#d1fae5"
+    src_label   = "⭐ Awesome List" if is_awesome else "GitHub"
+    src_bg      = "#fef3c7" if is_awesome else "#dcfce7"
+    src_fg      = "#92400e" if is_awesome else "#166534"
+
+    relevance  = item.get("relevance", 0)
+    rel_color  = "#16a34a" if relevance >= 70 else "#d97706" if relevance >= 40 else "#9ca3af"
+    rel_html   = f'<span style="font-size:11px;font-weight:600;color:{rel_color}">적합도 {relevance}%</span>' if relevance else ""
+    reason     = _html.escape(item.get("reason", ""))
+    reason_html= f'<div style="font-size:11px;color:#6b7280;margin-top:3px">💡 {reason}</div>' if reason else ""
+    display_sum= _html.escape(item.get("gemini_summary") or item.get("summary") or "설명 없음")
+
+    search_src = item.get("search_source", "")
+    src_hint   = {"topic": "topic 검색", "awesome": "awesome-list", "keyword": "키워드 검색"}.get(search_src, "")
+    src_hint_html = f'<span style="font-size:10px;color:#9ca3af;margin-left:6px">{src_hint}</span>' if src_hint else ""
+
+    topics_html = "".join(
+        f'<span style="font-size:10px;padding:1px 7px;border-radius:10px;background:#dcfce7;color:#166534;margin-right:3px">{_html.escape(t)}</span>'
         for t in item.get("topics", [])[:6]
     )
-    relevance   = item.get("relevance", 0)
-    rel_color   = "#16a34a" if relevance >= 70 else "#d97706" if relevance >= 40 else "#9ca3af"
-    rel_label   = f'<span style="font-size:11px;font-weight:600;color:{rel_color}">적합도 {relevance}%</span>' if relevance else ""
-    reason      = item.get("reason", "")
-    reason_html = f'<div style="font-size:11px;color:#6b7280;margin-top:3px">💡 {reason}</div>' if reason else ""
-    display_sum = item.get("gemini_summary") or item.get("summary") or "설명 없음"
-    pct         = min(100, relevance)
-    bar_html    = (f'<div style="height:3px;background:#f3f4f6;border-radius:2px;margin-top:8px">'
-                   f'<div style="width:{pct}%;height:3px;background:{rel_color};border-radius:2px"></div>'
-                   f'</div>') if relevance else ""
-    search_src  = item.get("search_source", "")
-    src_hint    = {"topic": "topic 검색", "awesome": "awesome-list", "keyword": "키워드 검색"}.get(search_src, "")
-    src_hint_html = (f'<span style="font-size:10px;color:#9ca3af;margin-left:6px">{src_hint}</span>'
-                     ) if src_hint else ""
+    pct      = min(100, relevance)
+    bar_html = (f'<div style="height:3px;background:#f3f4f6;border-radius:2px;margin-top:8px">'
+                f'<div style="width:{pct}%;height:3px;background:{rel_color};border-radius:2px"></div></div>') if relevance else ""
 
-    # f-string 내 dict 접근자 중첩 방지 — 미리 변수로 추출
-    _url    = item["url"]
-    _repo   = item["repo"]
-    _stars  = item["stars"]
-    _lang   = item.get("lang", "")
-    _forks  = item.get("forks", 0)
-    _pushed = item.get("pushed", item.get("updated", ""))
-    _sum    = display_sum
+    url    = _html.escape(item.get("url", ""), quote=True)
+    repo   = _html.escape(item.get("repo", ""))
+    stars  = item.get("stars", 0)
+    lang   = _html.escape(item.get("lang", ""))
+    forks  = item.get("forks", 0)
+    pushed = _html.escape(item.get("pushed", item.get("updated", "")))
 
-    st.markdown(
-        f'''<div class="{card_class}">
+    card_html = f"""
+<div style="border:1px solid {border_color};border-radius:12px;padding:1rem 1.2rem;
+            margin-bottom:0.7rem;background:{bg_color};font-family:sans-serif">
   <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:5px">
     <div>
-      {src_tag}{src_hint_html}&nbsp;
-      <a href="{_url}" target="_blank"
+      <span style="display:inline-block;font-size:10px;padding:1px 7px;border-radius:10px;
+                   background:{src_bg};color:{src_fg};font-weight:500">{src_label}</span>
+      {src_hint_html}&nbsp;
+      <a href="{url}" target="_blank"
          style="font-size:14px;font-weight:500;color:#111827;text-decoration:none">
-        {_repo} ↗
+        {repo} ↗
       </a>
       {reason_html}
     </div>
     <div style="text-align:right">
-      {rel_label}
-      <div style="font-size:11px;color:#9ca3af">★ {_stars} · {_lang}</div>
-      <div style="font-size:10px;color:#9ca3af">🍴 {_forks}</div>
+      {rel_html}
+      <div style="font-size:11px;color:#9ca3af">★ {stars} &middot; {lang}</div>
+      <div style="font-size:10px;color:#9ca3af">🍴 {forks}</div>
     </div>
   </div>
-  <div style="font-size:13px;color:#374151;line-height:1.5;margin-bottom:8px">{_sum}</div>
-  <div style="font-size:11px;color:#9ca3af;margin-bottom:5px">최근 커밋: {_pushed}</div>
+  <div style="font-size:13px;color:#374151;line-height:1.5;margin-bottom:8px">{display_sum}</div>
+  <div style="font-size:11px;color:#9ca3af;margin-bottom:5px">최근 커밋: {pushed}</div>
   {topics_html}
   {bar_html}
-</div>''',
-        unsafe_allow_html=True,
-    )
+</div>"""
+
+    st.components.v1.html(card_html, height=_card_height(relevance, reason, topics_html, bar_html), scrolling=False)
+
+
+def _card_height(relevance: int, reason: str, topics_html: str, bar_html: str) -> int:
+    """카드 내용에 따라 동적으로 높이 계산"""
+    h = 130
+    if reason:       h += 22
+    if topics_html:  h += 28
+    if bar_html:     h += 14
+    return h
 
 
 def render_reddit_card(item: dict):
