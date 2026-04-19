@@ -318,16 +318,15 @@ def _fetch_readme(repo_full_name: str) -> str:
         except Exception:
             return ""
     return content[:3000]
-# 2. 메인 검색 로직 내의 STEP 3 (이 부분을 바꾸시는 겁니다)
-# ── STEP 3: README 순차 수집 ──
-pre_sorted = sorted(candidates, key=lambda r: r["stars"], reverse=True)
-readme_count = min(3, len(pre_sorted)) if api_key else 0
-top_for_readme = pre_sorted[:readme_count]
+# ── STEP 3: README 순차 수집 (여기에 들여쓰기를 맞춰서 붙여넣으세요) ──
+    # 한 줄 앞에 공백 4칸(또는 Tab 1번)이 있어야 search_github 함수 소속이 됩니다.
+    pre_sorted = sorted(candidates, key=lambda r: r["stars"], reverse=True)
+    readme_count = min(3, len(pre_sorted)) if api_key else 0
+    top_for_readme = pre_sorted[:readme_count]
 
-# ThreadPoolExecutor 부분을 삭제하고 이 for문으로 교체
-for c in top_for_readme:
-    # _fetch_readme 내부의 _gh_request가 6초 대기를 수행함
-    c["readme"] = _fetch_readme(c["repo"])
+    for c in top_for_readme:
+        # _fetch_readme 내부의 _gh_request가 6초 대기를 수행함
+        c["readme"] = _fetch_readme(c["repo"])
 
 # ── STEP 4: 배치 재순위 (핵심 개선) ──────────────────────────────────────────
 def _batch_rerank(candidates: list[dict], user_query: str, api_key: str) -> list[dict]:
