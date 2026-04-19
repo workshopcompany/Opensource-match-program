@@ -39,7 +39,11 @@ def _call_gemini(prompt: str, api_key: str, max_tokens: int = 800) -> str | None
         )
         payload = json.dumps({
             "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"temperature": 0.1, "maxOutputTokens": max_tokens},
+            "generationConfig": {
+                "temperature": 0.1,
+                "maxOutputTokens": max_tokens,
+                "response_mime_type": "application/json",
+            },
         }).encode("utf-8")
         req = urllib.request.Request(
             url, data=payload, headers={"Content-Type": "application/json"}
@@ -420,41 +424,47 @@ def search_github(
 
     per_kw = max(3, max_results // max(len(keywords), 1))
 
-    # 2-A: 키워드 검색
-    for kw in keywords[:4]:
-        _add(_search_by_keyword(kw, per_page=per_kw))
-        if len(candidates) >= max_results * 3:
+    # 2-A: 키워드 검색 — 최대 2개로 제한 (rate limit 보호)
+    for kw in keywords[:2]:
+        _add(_search_by_keyword(kw, per_page=5))
+        if len(candidates) >= max_results * 2:
             break
 
-    # 2-B: GitHub Topics 검색 (키워드보다 정확도 높음)
-    for topic in topics[:3]:
-        _add(_search_by_topic(topic, per_page=4))
+    # 2-B: GitHub Topics 검색 — 1개만 (정확도 높고 호출 절약)
+    for topic in topics[:1]:
+        _add(_search_by_topic(topic, per_page=5))
 
-    # 2-C: Awesome-list 검색 (큐레이션 목록)
-    for aw_kw in awesome_kws[:2]:
+    # 2-C: Awesome-list 검색 — 1개만
+    for aw_kw in awesome_kws[:1]:
         _add(_search_awesome_lists(aw_kw, per_page=3))
 
     if not candidates:
         return [{"error": "GitHub 검색 결과가 없습니다."}]
 
-    # ── STEP 3: README 수집 (상위 후보만, 배치 재순위 품질 향상용) ──────────
-    # stars 순 상위 15개에 대해 README 수집
-    pre_sorted = sorted(candidates, key=lambda r: r["stars"], reverse=True)
-    readme_count = min(15, len(pre_sorted)) if api_key else 0
+    # ── STEP 3: README 병렬 수집 (상위 3개만 — API 호출 절약 + 속도 향상) ──
+    import concurrent.futures
 
-    for i in range(readme_count):
-        repo_name = pre_sorted[i]["repo"]
-        readme = _fetch_readme(repo_name)
-        # candidates 원본에도 반영
+    pre_sorted   = sorted(candidates, key=lambda r: r["stars"], reverse=True)
+    readme_count = min(3, len(pre_sorted)) if api_key else 0  # 3개로 대폭 축소
+    top_for_readme = pre_sorted[:readme_count]
+
+    def _fetch_and_assign(repo_dict: dict) -> dict:
+        repo_dict["readme"] = _fetch_readme(repo_dict["repo"])
+        return repo_dict
+
+    if top_for_readme:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+            fetched = list(executor.map(_fetch_and_assign, top_for_readme))
+        # candidates 원본에 반영
+        readme_map = {r["repo"]: r["readme"] for r in fetched}
         for c in candidates:
-            if c["repo"] == repo_name:
-                c["readme"] = readme
-                break
+            if c["repo"] in readme_map:
+                c["readme"] = readme_map[c["repo"]]
 
     # ── STEP 4: 배치 재순위 ──────────────────────────────────────────────────
     if api_key:
         # readme 있는 상위 15개만 배치 재순위
-        top_candidates = sorted(candidates, key=lambda r: r["stars"], reverse=True)[:15]
+        top_candidates = sorted(candidates, key=lambda r: r["stars"], reverse=True)[:10]
         rest = [c for c in candidates if c["repo"] not in {r["repo"] for r in top_candidates}]
         top_candidates = _batch_rerank(top_candidates, user_query, api_key)
         # 나머지는 star fallback
