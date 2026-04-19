@@ -274,6 +274,9 @@ def _search_awesome_lists(keyword: str, per_page: int = 3) -> list[dict]:
 
 def _parse_repos(data: dict | None, source_tag: str) -> list[dict]:
     if not data or "_error" in data:
+        # 💡 추가된 디버깅 코드: 에러가 나면 터미널(콘솔)에 빨간 글씨로 이유를 출력합니다.
+        if data and "_error" in data:
+            print(f"🚨 [GitHub API 에러 - {source_tag}] 원인: {data['_error']}")
         return []
     results = []
     for item in data.get("items", []):
