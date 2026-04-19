@@ -257,29 +257,39 @@ def render_github_card(item: dict):
     src_hint_html = (f'<span style="font-size:10px;color:#9ca3af;margin-left:6px">{src_hint}</span>'
                      ) if src_hint else ""
 
-    st.markdown(f"""
-    <div class="{card_class}">
-      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:5px">
-        <div>
-          {src_tag}{src_hint_html}&nbsp;
-          <a href="{item['url']}" target="_blank"
-             style="font-size:14px;font-weight:500;color:#111827;text-decoration:none">
-            {item['repo']} ↗
-          </a>
-          {reason_html}
-        </div>
-        <div style="text-align:right">
-          {rel_label}
-          <div style="font-size:11px;color:#9ca3af">★ {item['stars']} · {item.get('lang','')}</div>
-          <div style="font-size:10px;color:#9ca3af">🍴 {item.get('forks',0)}</div>
-        </div>
-      </div>
-      <div style="font-size:13px;color:#374151;line-height:1.5;margin-bottom:8px">{display_sum}</div>
-      <div style="font-size:11px;color:#9ca3af;margin-bottom:5px">최근 커밋: {item.get('pushed', item.get('updated',''))}</div>
-      {topics_html}
-      {bar_html}
+    # f-string 내 dict 접근자 중첩 방지 — 미리 변수로 추출
+    _url    = item["url"]
+    _repo   = item["repo"]
+    _stars  = item["stars"]
+    _lang   = item.get("lang", "")
+    _forks  = item.get("forks", 0)
+    _pushed = item.get("pushed", item.get("updated", ""))
+    _sum    = display_sum
+
+    st.markdown(
+        f'''<div class="{card_class}">
+  <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:5px">
+    <div>
+      {src_tag}{src_hint_html}&nbsp;
+      <a href="{_url}" target="_blank"
+         style="font-size:14px;font-weight:500;color:#111827;text-decoration:none">
+        {_repo} ↗
+      </a>
+      {reason_html}
     </div>
-    """, unsafe_allow_html=True)
+    <div style="text-align:right">
+      {rel_label}
+      <div style="font-size:11px;color:#9ca3af">★ {_stars} · {_lang}</div>
+      <div style="font-size:10px;color:#9ca3af">🍴 {_forks}</div>
+    </div>
+  </div>
+  <div style="font-size:13px;color:#374151;line-height:1.5;margin-bottom:8px">{_sum}</div>
+  <div style="font-size:11px;color:#9ca3af;margin-bottom:5px">최근 커밋: {_pushed}</div>
+  {topics_html}
+  {bar_html}
+</div>''',
+        unsafe_allow_html=True,
+    )
 
 
 def render_reddit_card(item: dict):
