@@ -70,7 +70,11 @@ def _call_gemini(prompt: str, api_key: str, max_tokens: int = 300) -> str | None
         )
         payload = json.dumps({
             "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"temperature": 0.1, "maxOutputTokens": max_tokens},
+            "generationConfig": {
+                "temperature": 0.1,
+                "maxOutputTokens": max_tokens,
+                "response_mime_type": "application/json",
+            },
         }).encode("utf-8")
         req = urllib.request.Request(
             url, data=payload, headers={"Content-Type": "application/json"}
