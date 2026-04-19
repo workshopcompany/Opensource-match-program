@@ -2,9 +2,11 @@
 GitHub Search API — 무료, 인증 없이 10 req/min
 GITHUB_TOKEN 환경변수 설정 시 30 req/min으로 상향
 
-Gemini 연동:
-  1) 사용자 질문(한국어 포함) → 영어 GitHub 검색 키워드 3~5개로 변환
-  2) 검색된 저장소 README를 읽고 적합도(0~100) + 한줄 요약 생성
+개선된 Gemini 연동:
+  1) 쿼리 의도(intent) 분석 → 검색 타입 결정 (라이브러리/GUI앱/시뮬레이션/교육예제 등)
+  2) 한국어 포함 자연어 → 영어 GitHub 키워드 + topic 태그 + awesome 키워드로 확장
+  3) 일반 검색 + GitHub Topics 검색 + Awesome-list 검색 병렬 수행
+  4) 상위 후보 전체를 한 번의 Gemini 호출로 배치 재순위(batch re-ranking)
 """
 import os
 import json
@@ -14,16 +16,17 @@ import urllib.request
 import urllib.parse
 import urllib.error
 
-GITHUB_API = "https://api.github.com"
+GITHUB_API    = "https://api.github.com"
 GEMINI_MODELS = ["gemini-2.0-flash", "gemini-2.0-flash-lite"]
-GEMINI_DELAY  = 5  # 무료 티어 Rate Limit 보호
+GEMINI_DELAY  = 5   # 무료 티어 Rate Limit 보호
+GH_DELAY      = 6   # GitHub 비인증 10 req/min → 6초 간격
 
 _last_gh_call:     float = 0.0
 _last_gemini_call: float = 0.0
 
 
 # ── Gemini 호출 공통 ──────────────────────────────────────────────────────────
-def _call_gemini(prompt: str, api_key: str, max_tokens: int = 500) -> str | None:
+def _call_gemini(prompt: str, api_key: str, max_tokens: int = 800) -> str | None:
     global _last_gemini_call
     elapsed = time.time() - _last_gemini_call
     if elapsed < GEMINI_DELAY:
@@ -42,69 +45,93 @@ def _call_gemini(prompt: str, api_key: str, max_tokens: int = 500) -> str | None
             url, data=payload, headers={"Content-Type": "application/json"}
         )
         try:
-            with urllib.request.urlopen(req, timeout=15) as resp:
+            with urllib.request.urlopen(req, timeout=20) as resp:
                 data = json.loads(resp.read())
             _last_gemini_call = time.time()
             return data["candidates"][0]["content"]["parts"][0]["text"].strip()
         except urllib.error.HTTPError as e:
             if e.code == 429:
-                continue   # 다음 모델로 폴백
+                continue
             return None
         except Exception:
             return None
     return None
 
 
-# ── STEP 1: 쿼리 → 영어 GitHub 키워드 변환 ───────────────────────────────────
-def expand_query(user_query: str, api_key: str | None) -> list[str]:
+# ── STEP 1-A: 쿼리 의도(intent) 분석 ────────────────────────────────────────
+def analyze_intent(user_query: str, api_key: str) -> dict:
     """
-    Gemini가 있으면: 한국어/자연어 질문을 GitHub 검색에 최적화된 영어 키워드 3~5개로 변환
-    없으면: 원본 쿼리를 공백 기준으로 분리해 그대로 사용
+    Gemini가 사용자 쿼리를 분석해 검색 전략을 결정합니다.
+    반환: {
+        "type": "simulation|library|gui_app|cli_tool|tutorial|dataset|other",
+        "domain": "robotics|ML|engineering|data|devops|other",
+        "keywords": [...],       # 일반 GitHub 키워드 3~5개
+        "topics": [...],         # GitHub topic 태그 2~4개
+        "awesome_keywords": [...] # awesome-list 검색용 1~2개
+    }
     """
-    if not api_key:
-        return [user_query]
+    prompt = f"""You are a GitHub search strategy expert.
 
-    prompt = f"""You are a GitHub search query optimizer.
-
-Convert the following user query into 3-5 English GitHub search keyword phrases
-that will find the most relevant open-source repositories.
-
-Rules:
-- Output ONLY a JSON array of strings, no explanation
-- Each phrase should be 2-4 words max
-- Focus on technical terms, library names, algorithms
-- Include both specific and broader terms
-- If the query is in Korean, translate and expand appropriately
+Analyze the user's query and return a JSON search plan.
 
 User query: "{user_query}"
 
-Example output: ["bipedal balance control", "biped walking PID", "humanoid locomotion PyBullet", "bipedal robot simulation"]
+Rules:
+- Output ONLY valid JSON, no explanation, no markdown fences
+- "type": one of [simulation, library, gui_app, cli_tool, tutorial, dataset, framework, other]
+- "domain": one of [robotics, ml_ai, engineering, data_tools, devops, other]
+- "keywords": 3-5 English GitHub search phrases (2-4 words each), optimized for repo names/descriptions
+- "topics": 2-4 GitHub topic tag strings (lowercase-hyphenated, e.g. "bipedal-robot"), used in topic: searches
+- "awesome_keywords": 1-2 terms for searching awesome-lists (e.g. "robotics", "bipedal")
+- If Korean input, translate and expand appropriately
 
-Output:"""
+Example for "이족보행 로봇 PID 제어 시뮬레이션":
+{{
+  "type": "simulation",
+  "domain": "robotics",
+  "keywords": ["bipedal walking simulation", "biped PID control", "humanoid locomotion PyBullet", "bipedal balance robot"],
+  "topics": ["bipedal-robot", "locomotion", "pid-control", "robotics-simulation"],
+  "awesome_keywords": ["robotics", "bipedal"]
+}}
 
-    raw = _call_gemini(prompt, api_key, max_tokens=200)
+Output JSON:"""
+
+    raw = _call_gemini(prompt, api_key, max_tokens=400)
     if not raw:
-        return [user_query]
+        return _fallback_intent(user_query)
     try:
         raw = re.sub(r"```json|```", "", raw).strip()
-        keywords = json.loads(raw)
-        if isinstance(keywords, list) and keywords:
-            return keywords[:5]
+        result = json.loads(raw)
+        # 필수 키 검증
+        for k in ("keywords", "topics", "awesome_keywords"):
+            if k not in result or not isinstance(result[k], list):
+                return _fallback_intent(user_query)
+        return result
     except Exception:
-        pass
-    return [user_query]
+        return _fallback_intent(user_query)
+
+
+def _fallback_intent(user_query: str) -> dict:
+    """Gemini 없을 때 기본 fallback"""
+    return {
+        "type": "other",
+        "domain": "other",
+        "keywords": [user_query],
+        "topics": [],
+        "awesome_keywords": [],
+    }
 
 
 # ── GitHub API 공통 요청 ──────────────────────────────────────────────────────
-def _gh_request(url: str) -> dict | None:
+def _gh_request(url: str, delay: float = GH_DELAY) -> dict | None:
     global _last_gh_call
     elapsed = time.time() - _last_gh_call
-    if elapsed < 6:
-        time.sleep(6 - elapsed)
+    if elapsed < delay:
+        time.sleep(delay - elapsed)
 
     headers = {
         "Accept": "application/vnd.github.v3+json",
-        "User-Agent": "OpenSourceMatchmaker/1.0",
+        "User-Agent": "OpenSourceMatchmaker/2.0",
     }
     token = os.environ.get("GITHUB_TOKEN", "")
     if token:
@@ -123,8 +150,8 @@ def _gh_request(url: str) -> dict | None:
         return {"_error": str(e)}
 
 
-# ── STEP 2: GitHub 검색 ───────────────────────────────────────────────────────
-def _search_repos(keyword: str, per_page: int = 5) -> list[dict]:
+# ── STEP 2-A: 일반 키워드 검색 ───────────────────────────────────────────────
+def _search_by_keyword(keyword: str, per_page: int = 5) -> list[dict]:
     params = urllib.parse.urlencode({
         "q": keyword,
         "sort": "stars",
@@ -132,9 +159,49 @@ def _search_repos(keyword: str, per_page: int = 5) -> list[dict]:
         "per_page": per_page,
     })
     data = _gh_request(f"{GITHUB_API}/search/repositories?{params}")
+    return _parse_repos(data, "keyword")
+
+
+# ── STEP 2-B: GitHub Topics 검색 ─────────────────────────────────────────────
+def _search_by_topic(topic: str, per_page: int = 5) -> list[dict]:
+    """
+    GitHub topic 태그로 검색 — keyword 검색보다 분류가 정확함
+    예: topic:bipedal-robot
+    """
+    params = urllib.parse.urlencode({
+        "q": f"topic:{topic}",
+        "sort": "stars",
+        "order": "desc",
+        "per_page": per_page,
+    })
+    data = _gh_request(f"{GITHUB_API}/search/repositories?{params}")
+    return _parse_repos(data, "topic")
+
+
+# ── STEP 2-C: Awesome-list 검색 ──────────────────────────────────────────────
+def _search_awesome_lists(keyword: str, per_page: int = 3) -> list[dict]:
+    """
+    'awesome + {keyword}' 큐레이션 목록 저장소 검색.
+    awesome-list는 사람이 직접 검증한 고품질 링크 모음이라 신뢰도가 높음.
+    awesome-list 자체는 별도 카드로 표시.
+    """
+    params = urllib.parse.urlencode({
+        "q": f"awesome {keyword} in:name,description",
+        "sort": "stars",
+        "order": "desc",
+        "per_page": per_page,
+    })
+    data = _gh_request(f"{GITHUB_API}/search/repositories?{params}")
+    repos = _parse_repos(data, "awesome")
+    # is_awesome 플래그 추가
+    for r in repos:
+        r["is_awesome"] = True
+    return repos
+
+
+def _parse_repos(data: dict | None, source_tag: str) -> list[dict]:
     if not data or "_error" in data:
         return []
-
     results = []
     for item in data.get("items", []):
         results.append({
@@ -147,126 +214,192 @@ def _search_repos(keyword: str, per_page: int = 5) -> list[dict]:
             "url":     item.get("html_url", ""),
             "topics":  item.get("topics", []),
             "updated": item.get("updated_at", "")[:10],
+            "pushed":  item.get("pushed_at", "")[:10],   # 최근 커밋 기준 활성도
+            "forks":   item.get("forks_count", 0),
+            "open_issues": item.get("open_issues_count", 0),
             "source":  "github",
+            "search_source": source_tag,  # keyword / topic / awesome
             "readme":  "",
             "gemini_summary": "",
             "relevance": 0,
+            "is_awesome": False,
         })
     return results
 
 
 # ── STEP 3: README 가져오기 ───────────────────────────────────────────────────
 def _fetch_readme(repo_full_name: str) -> str:
-    data = _gh_request(
-        f"{GITHUB_API}/repos/{repo_full_name}/readme"
-    )
+    data = _gh_request(f"{GITHUB_API}/repos/{repo_full_name}/readme")
     if not data or "_error" in data:
         return ""
-    # base64 디코딩
     import base64
-    content = data.get("content", "")
+    content  = data.get("content", "")
     encoding = data.get("encoding", "")
     if encoding == "base64":
         try:
             decoded = base64.b64decode(content).decode("utf-8", errors="ignore")
-            return decoded[:3000]  # 앞 3000자만
+            return decoded[:3000]
         except Exception:
             return ""
     return content[:3000]
 
 
-# ── STEP 4: Gemini로 적합도 판단 + 한줄 요약 ─────────────────────────────────
-def _evaluate_repo(repo: dict, user_query: str, api_key: str) -> dict:
-    readme_snippet = repo.get("readme", "")[:2000]
-    description    = repo.get("summary", "")
-    topics         = ", ".join(repo.get("topics", []))
+# ── STEP 4: 배치 재순위 (핵심 개선) ──────────────────────────────────────────
+def _batch_rerank(candidates: list[dict], user_query: str, api_key: str) -> list[dict]:
+    """
+    상위 후보 전체를 한 번의 Gemini 호출로 재순위.
+    기존: 후보마다 Gemini 1회 호출 → N회 호출, 느리고 API 낭비.
+    개선: 모든 후보를 하나의 프롬프트에 담아 ranked list 반환 → 1회 호출.
+    """
+    if not candidates:
+        return candidates
 
-    prompt = f"""You are evaluating whether a GitHub repository matches a user's need.
+    # 후보 목록을 간결하게 정리 (토큰 절약)
+    repo_list = []
+    for i, r in enumerate(candidates):
+        readme_snip = r.get("readme", "")[:500]
+        repo_list.append(
+            f'[{i}] {r["repo"]} | ★{r["stars"]} | {r.get("lang","")} | '
+            f'topics: {",".join(r.get("topics",[])[:4])} | '
+            f'desc: {r.get("summary","")[:100]} | '
+            f'readme: {readme_snip[:200]}'
+        )
+
+    prompt = f"""You are evaluating GitHub repositories for a user's need.
 
 User's need (may be in Korean): "{user_query}"
 
-Repository: {repo['repo']}
-Description: {description}
-Topics: {topics}
-README (first 2000 chars):
-\"\"\"
-{readme_snippet}
-\"\"\"
+Below are {len(repo_list)} candidate repositories:
 
-Output ONLY a JSON object (no markdown):
-{{
-  "relevance": 0-100,
-  "reason": "한 줄 적합 이유 (한국어, 30자 이내)",
-  "summary_ko": "이 앱은 ...을 해주는 무료 도구입니다 (한국어, 50자 이내)"
-}}"""
+{chr(10).join(repo_list)}
 
-    raw = _call_gemini(prompt, api_key, max_tokens=200)
+Task:
+1. Score each repository 0-100 for relevance to the user's need
+2. Write a Korean one-line summary (50자 이내) per repo
+3. Write a Korean reason (30자 이내) per repo
+
+Output ONLY a JSON array in this exact format (no markdown, no explanation):
+[
+  {{"idx": 0, "relevance": 85, "summary_ko": "...", "reason": "..."}},
+  {{"idx": 1, "relevance": 40, "summary_ko": "...", "reason": "..."}},
+  ...
+]
+
+Include ALL {len(repo_list)} items. Output:"""
+
+    raw = _call_gemini(prompt, api_key, max_tokens=1200)
     if not raw:
-        return repo
+        return _star_fallback(candidates)
 
     try:
         raw = re.sub(r"```json|```", "", raw).strip()
-        result = json.loads(raw)
-        repo["relevance"]      = result.get("relevance", 0)
-        repo["reason"]         = result.get("reason", "")
-        repo["gemini_summary"] = result.get("summary_ko", repo["summary"])
+        scores = json.loads(raw)
+        score_map = {item["idx"]: item for item in scores if isinstance(item, dict)}
+        for i, repo in enumerate(candidates):
+            s = score_map.get(i, {})
+            candidates[i]["relevance"]      = s.get("relevance", 0)
+            candidates[i]["gemini_summary"] = s.get("summary_ko", repo["summary"])
+            candidates[i]["reason"]         = s.get("reason", "")
+        return candidates
     except Exception:
-        pass
-    return repo
+        return _star_fallback(candidates)
+
+
+def _star_fallback(candidates: list[dict]) -> list[dict]:
+    """Gemini 없을 때 stars 기반 점수"""
+    for r in candidates:
+        r["relevance"]      = min(50, r["stars"] // 20)
+        r["gemini_summary"] = r["summary"]
+        r["reason"]         = "별점 기준"
+    return candidates
 
 
 # ── 메인 함수 ─────────────────────────────────────────────────────────────────
 def search_github(
     user_query: str,
-    max_results: int = 8,
+    max_results: int = 10,
     use_gemini: bool = True,
 ) -> list[dict]:
     """
-    1) Gemini로 쿼리 확장 (한국어 → 영어 키워드)
-    2) 키워드별 GitHub 검색 (중복 제거)
-    3) README 가져오기
-    4) Gemini로 적합도 평가 + 한국어 요약
-    5) 적합도 순 정렬
+    개선된 3단계 GitHub 검색:
+
+    1) Intent Analysis  : Gemini가 쿼리 의도를 파악 → 키워드/topic/awesome 분리
+    2) Multi-source     : 일반 키워드 + GitHub Topics + Awesome-list 병렬 검색
+    3) Batch Re-ranking : 상위 후보 전체를 Gemini 1회 호출로 재순위
     """
     api_key = os.environ.get("GEMINI_API_KEY") if use_gemini else None
 
-    # STEP 1: 쿼리 확장
-    keywords = expand_query(user_query, api_key)
+    # ── STEP 1: 의도 분석 ────────────────────────────────────────────────────
+    if api_key:
+        intent = analyze_intent(user_query, api_key)
+    else:
+        intent = _fallback_intent(user_query)
 
-    # STEP 2: 각 키워드로 검색 (중복 제거)
+    keywords        = intent.get("keywords", [user_query])
+    topics          = intent.get("topics", [])
+    awesome_kws     = intent.get("awesome_keywords", [])
+
+    # ── STEP 2: 멀티소스 검색 ────────────────────────────────────────────────
     seen_repos: set[str] = set()
     candidates: list[dict] = []
-    per_kw = max(3, max_results // len(keywords))
 
-    for kw in keywords:
-        repos = _search_repos(kw, per_page=per_kw)
+    def _add(repos: list[dict]):
         for r in repos:
             if r["repo"] not in seen_repos:
                 seen_repos.add(r["repo"])
                 candidates.append(r)
-        if len(candidates) >= max_results * 2:
+
+    per_kw = max(3, max_results // max(len(keywords), 1))
+
+    # 2-A: 키워드 검색
+    for kw in keywords[:4]:
+        _add(_search_by_keyword(kw, per_page=per_kw))
+        if len(candidates) >= max_results * 3:
             break
+
+    # 2-B: GitHub Topics 검색 (키워드보다 정확도 높음)
+    for topic in topics[:3]:
+        _add(_search_by_topic(topic, per_page=4))
+
+    # 2-C: Awesome-list 검색 (큐레이션 목록)
+    for aw_kw in awesome_kws[:2]:
+        _add(_search_awesome_lists(aw_kw, per_page=3))
 
     if not candidates:
         return [{"error": "GitHub 검색 결과가 없습니다."}]
 
-    # STEP 3 & 4: README + Gemini 평가 (상위 후보만, API 절약)
-    evaluate_count = min(6, len(candidates)) if api_key else 0
+    # ── STEP 3: README 수집 (상위 후보만, 배치 재순위 품질 향상용) ──────────
+    # stars 순 상위 15개에 대해 README 수집
+    pre_sorted = sorted(candidates, key=lambda r: r["stars"], reverse=True)
+    readme_count = min(15, len(pre_sorted)) if api_key else 0
 
-    for i, repo in enumerate(candidates[:evaluate_count]):
-        # README 가져오기
-        readme = _fetch_readme(repo["repo"])
-        candidates[i]["readme"] = readme
-        # Gemini 적합도 평가
-        candidates[i] = _evaluate_repo(candidates[i], user_query, api_key)
+    for i in range(readme_count):
+        repo_name = pre_sorted[i]["repo"]
+        readme = _fetch_readme(repo_name)
+        # candidates 원본에도 반영
+        for c in candidates:
+            if c["repo"] == repo_name:
+                c["readme"] = readme
+                break
 
-    # 나머지는 별점을 적합도 대신 사용
-    for i in range(evaluate_count, len(candidates)):
-        candidates[i]["relevance"] = min(50, candidates[i]["stars"] // 10)
-        candidates[i]["gemini_summary"] = candidates[i]["summary"]
-        candidates[i]["reason"] = "별점 기준 정렬"
+    # ── STEP 4: 배치 재순위 ──────────────────────────────────────────────────
+    if api_key:
+        # readme 있는 상위 15개만 배치 재순위
+        top_candidates = sorted(candidates, key=lambda r: r["stars"], reverse=True)[:15]
+        rest = [c for c in candidates if c["repo"] not in {r["repo"] for r in top_candidates}]
+        top_candidates = _batch_rerank(top_candidates, user_query, api_key)
+        # 나머지는 star fallback
+        rest = _star_fallback(rest)
+        candidates = top_candidates + rest
+    else:
+        candidates = _star_fallback(candidates)
 
-    # STEP 5: 적합도 순 정렬
-    candidates.sort(key=lambda r: (r["relevance"], r["stars"]), reverse=True)
+    # ── STEP 5: 정렬 후 반환 ─────────────────────────────────────────────────
+    # awesome-list는 별도 가중치 (큐레이션 신뢰도 반영)
+    def sort_key(r: dict):
+        base  = r["relevance"]
+        bonus = 10 if r.get("is_awesome") else 0
+        return (base + bonus, r["stars"])
 
+    candidates.sort(key=sort_key, reverse=True)
     return candidates[:max_results]
