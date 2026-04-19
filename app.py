@@ -142,6 +142,18 @@ def render_github_card(item: dict):
         f'background:#dcfce7;color:#166534;margin-right:3px">{t}</span>'
         for t in item.get("topics", [])[:6]
     )
+    relevance  = item.get("relevance", 0)
+    rel_color  = "#16a34a" if relevance >= 70 else "#d97706" if relevance >= 40 else "#9ca3af"
+    rel_label  = f'<span style="font-size:11px;font-weight:600;color:{rel_color}">적합도 {relevance}%</span>' if relevance else ""
+    reason     = item.get("reason", "")
+    reason_html = f'<div style="font-size:11px;color:#6b7280;margin-top:3px">💡 {reason}</div>' if reason else ""
+    # Gemini 요약 우선, 없으면 GitHub description
+    display_summary = item.get("gemini_summary") or item.get("summary") or "설명 없음"
+    pct = min(100, relevance)
+    bar_html = f'''<div style="height:3px;background:#f3f4f6;border-radius:2px;margin-top:8px">
+      <div style="width:{pct}%;height:3px;background:{rel_color};border-radius:2px"></div>
+    </div>''' if relevance else ""
+
     st.markdown(f"""
     <div class="gh-card">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:5px">
@@ -151,12 +163,17 @@ def render_github_card(item: dict):
              style="font-size:14px;font-weight:500;color:#111827;text-decoration:none">
             {item['repo']} ↗
           </a>
+          {reason_html}
         </div>
-        <span style="font-size:12px;color:#6b7280">★ {item['stars']} · {item.get('lang','')}</span>
+        <div style="text-align:right">
+          {rel_label}
+          <div style="font-size:11px;color:#9ca3af">★ {item['stars']} · {item.get('lang','')}</div>
+        </div>
       </div>
-      <div style="font-size:13px;color:#374151;line-height:1.5;margin-bottom:8px">{item['summary']}</div>
+      <div style="font-size:13px;color:#374151;line-height:1.5;margin-bottom:8px">{display_summary}</div>
       <div style="font-size:11px;color:#9ca3af;margin-bottom:5px">업데이트: {item.get('updated','')}</div>
       {topics_html}
+      {bar_html}
     </div>
     """, unsafe_allow_html=True)
 
@@ -374,8 +391,8 @@ elif page == "🔎 앱 검색":
                 # 1) 내 DB
                 db_scored = sorted(db, key=lambda a: semantic_score(a, query), reverse=True)
 
-                # 2) GitHub Search API
-                gh_results = search_github(query, max_results=8) if use_github else []
+                # 2) GitHub Search API (Gemini 쿼리 확장 + README 적합도 평가)
+                gh_results = search_github(query, max_results=8, use_gemini=bool(os.environ.get("GEMINI_API_KEY"))) if use_github else []
 
                 # 3) Reddit
                 rd_results = search_reddit(query, max_results=6) if use_reddit else []
@@ -418,7 +435,11 @@ elif page == "🔎 앱 검색":
                 err = gh_results[0].get("error", "결과 없음") if gh_results else "결과 없음"
                 st.warning(f"GitHub 검색 결과 없음: {err}")
             else:
-                st.caption(f"GitHub에서 '{query}' 관련 저장소 {len(gh_ok)}개 발견")
+                api_key = os.environ.get("GEMINI_API_KEY")
+                if api_key:
+                    st.caption(f"🤖 Gemini가 쿼리를 영어 키워드로 확장 → GitHub에서 '{query}' 관련 저장소 {len(gh_ok)}개 발견 (적합도순)")
+                else:
+                    st.caption(f"GitHub에서 '{query}' 관련 저장소 {len(gh_ok)}개 발견 (Gemini 없음: 키워드 그대로 검색)")
                 for item in gh_ok:
                     render_github_card(item)
                     # 내 DB에 없으면 등록 버튼 표시
