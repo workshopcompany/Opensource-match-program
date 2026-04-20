@@ -362,7 +362,7 @@ Output ONLY a JSON array in this exact format (no markdown, no explanation):
 
 Include ALL {len(repo_list)} items. Output:"""
 
-    raw = _call_gemini(prompt, api_key, max_tokens=1500)
+    raw = _call_gemini(prompt, api_key, max_tokens=3000)
     if not raw:
         return _star_fallback(candidates)
 
@@ -428,7 +428,7 @@ def search_github(
 
     # 2-A: 키워드 검색 — 모든 키워드 사용 (pool 확장)
     for kw in keywords[:5]:
-        _add(_search_by_keyword(kw, per_page=10))
+        _add(_search_by_keyword(kw, per_page=per_kw))
         if len(candidates) >= max_results * 4:
             break
 
@@ -475,7 +475,7 @@ def search_github(
 
     # 적합성 필터: relevance 20점 미만만 제외 (약 80% 통과 기준)
     # Gemini 무료 API 점수 분포 특성상 20점 이상이면 의미 있는 연관성 보유
-    filtered = [c for c in candidates if c["relevance"] >= 20]
+    filtered = [c for c in candidates if c["relevance"] >= 5]
     if not filtered:
         filtered = candidates   # 전부 낮으면 필터 무시
 
