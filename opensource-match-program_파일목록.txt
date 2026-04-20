@@ -1,0 +1,148 @@
+================================================================
+  OpenSource App Matchmaker — 최종 파일 목록 & 변경 이력
+  GitHub 저장소: https://github.com/workcompany/opensource-match-program
+  기준일: 2026-04-19
+================================================================
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+■ 저장소 파일 트리 (GitHub 업로드 위치)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+opensource-match-program/          ← 저장소 루트
+│
+├── app.py                         ★ 메인 Streamlit 앱
+├── requirements.txt               의존 패키지 목록
+├── README.md                      프로젝트 설명
+├── .gitignore                     제외 파일 설정
+├── debug_search.py                🆕 검색 파이프라인 디버그 스크립트
+│
+├── .streamlit/
+│   ├── config.toml                테마 설정
+│   └── secrets.toml               🔒 로컬 전용 (gitignore됨, 절대 push 금지)
+│
+├── utils/
+│   ├── __init__.py                패키지 초기화
+│   ├── db.py                      JSON DB 로드/저장 + 시드 데이터 4개
+│   ├── classifier.py              저장소 카테고리 분류 (Gemini + 키워드 폴백)
+│   ├── matcher.py                 시맨틱 스코어링 (로컬 DB 매칭)
+│   ├── github_fetcher.py          저장소 등록 시 README 수집
+│   ├── github_search.py           ★ GitHub Search API (Gemini 쿼리 확장 + 적합도 평가)
+│   └── reddit_search.py           ★ Reddit 공개 API (Gemini 번역 + 도메인별 서브레딧)
+│
+└── data/
+    └── .gitkeep                   디렉토리 유지용 (apps.json은 gitignore됨)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+■ Streamlit Cloud Secrets 설정 (필수)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  [share.streamlit.io] → 앱 설정 → Secrets 탭에 아래 붙여넣기:
+
+  GEMINI_API_KEY = "AIzaSy-..."          ← 필수 (분류 + 검색 품질)
+  GITHUB_TOKEN   = "ghp_..."             ← 선택 (10→30 req/min 상향)
+
+  Gemini API 키 발급: https://aistudio.google.com/apikey
+  GitHub Token 발급:  https://github.com/settings/tokens
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+■ 변경 이력 (회차별)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+[1차] 초기 생성
+  · app.py, requirements.txt, README.md, .gitignore
+  · utils/db.py, classifier.py, matcher.py, github_fetcher.py
+  · .streamlit/config.toml, secrets.toml
+  · Anthropic API 기반 카테고리 분류
+
+[2차] Gemini API 전환
+  · utils/classifier.py 수정
+    - Anthropic API → Gemini API 완전 교체
+    - 외부 라이브러리 없이 표준 urllib 사용
+    - requirements.txt에서 anthropic 제거
+
+[3차] 쿨다운 UI + 저장소명 + Gemini 폴백 모델
+  · app.py 수정
+    - GitHub 저장소: workcompany/opensource-match-program 반영
+    - 5초 쿨다운 UI 내장 (무료 티어 Rate Limit 보호)
+    - 사이드바 Gemini API 상태 실시간 표시
+  · utils/classifier.py 수정
+    - gemini-2.0-flash → 할당량 초과 시 gemini-2.0-flash-lite 자동 폴백
+    - 폴백 시 사용 모델명 UI에 표시
+
+[4차] 3중 소스 검색 추가 (GitHub Search + Reddit)
+  · app.py 수정
+    - 검색 페이지: 3탭 구조로 전면 개편
+      · 탭1: 내 DB (시맨틱 스코어 pts 표시)
+      · 탭2: GitHub Search API (별점순)
+      · 탭3: Reddit 공개 API (업보트/댓글 수 표시)
+    - GitHub 탭에서 바로 DB 등록 가능
+  · utils/github_search.py 신규 추가
+    - GitHub Search API 무료 사용 (비인증 10 req/min)
+    - GITHUB_TOKEN 있으면 30 req/min 자동 적용
+  · utils/reddit_search.py 신규 추가
+    - Reddit 공개 JSON API (인증 불필요)
+    - r/opensource, r/Python, r/robotics 등 5개 서브레딧 검색
+
+[5차] Gemini 검색 지능 강화 (Grok 수준 검색)
+  · utils/github_search.py 전면 수정
+    - STEP1: Gemini가 한국어 질문 → 영어 GitHub 키워드 3~5개 확장
+             예) "이족보행 균형 제어" → ["bipedal balance control",
+                 "biped walking PID", "humanoid locomotion PyBullet"]
+    - STEP2: 키워드별 GitHub 검색 + 중복 제거
+    - STEP3: 상위 6개 저장소 README 자동 수집
+    - STEP4: Gemini가 README 읽고 적합도(0~100%) + 한국어 요약 생성
+    - STEP5: 적합도 순 정렬 (Gemini 없으면 별점순 유지)
+  · app.py 수정
+    - GitHub 탭 카드에 적합도 % + 컬러 바 + 이유 한줄 표시
+    - Gemini 유무에 따른 안내 문구 분기
+
+[6차] 최종 파일 반영 (참고용, 추가 수정 없음)
+  · utils/reddit_search.py 최종본 반영
+    - Gemini로 쿼리 번역 + 도메인 감지 (robotics/ml_ai/engineering 등)
+    - 도메인별 전문 서브레딧 동적 선택
+    - 전체 Reddit 검색 + 서브레딧 타겟 검색 병행
+    - 2년 이내 포스트만 필터링
+    - relevance + upvote 기준 정렬
+  · debug_search.py 신규 추가 (루트 위치)
+    - 검색 파이프라인 단계별 디버그 스크립트
+    - 실행: python debug_search.py "이족보행 로봇 시뮬레이션"
+    - 인터넷 연결, GitHub API, Gemini, Reddit 순차 테스트
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+■ 검색 동작 흐름 (최종)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  사용자 입력: "이족보행 균형 제어 파이썬"
+       │
+       ├─ [내 DB 탭]
+       │    로컬 키워드 매칭 → 점수순 정렬
+       │
+       ├─ [GitHub 탭]
+       │    Gemini: 한국어 → 영어 키워드 3~5개 변환
+       │    GitHub Search API: 키워드별 검색 + 중복 제거
+       │    GitHub API: 상위 6개 README 수집
+       │    Gemini: README 읽고 적합도% + 한국어 요약
+       │    → 적합도 순 표시 + 바로 DB 등록 가능
+       │
+       └─ [Reddit 탭]
+            Gemini: 한국어 → 영어 번역 + 도메인 감지
+            도메인별 서브레딧 선택 (예: robotics 도메인
+              → r/robotics, r/ROS, r/reinforcementlearning ...)
+            전체 Reddit + 서브레딧 타겟 검색 병행
+            → relevance + 업보트 순 표시
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+■ API 비용 정리 (모두 무료)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Gemini API      무료 티어 / 15 RPM / gemini-2.0-flash 우선
+                  → 초과 시 gemini-2.0-flash-lite 자동 폴백
+                  → 둘 다 초과 시 키워드 분류로 폴백
+  GitHub Search   무료 / 비인증 10 req/min / 토큰 있으면 30 req/min
+  Reddit API      완전 무료 / 인증 불필요
+
+================================================================
