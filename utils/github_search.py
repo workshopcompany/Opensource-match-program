@@ -224,7 +224,7 @@ def _gh_request(url: str, delay: float = GH_DELAY) -> dict | None:
 
 
 # ── STEP 2-A: 일반 키워드 검색 ───────────────────────────────────────────────
-def _search_by_keyword(keyword: str, per_page: int = 5) -> list[dict]:
+def _search_by_keyword(keyword: str, per_page: int = 10) -> list[dict]:
     params = urllib.parse.urlencode({
         "q": keyword,
         "sort": "stars",
@@ -236,7 +236,7 @@ def _search_by_keyword(keyword: str, per_page: int = 5) -> list[dict]:
 
 
 # ── STEP 2-B: GitHub Topics 검색 ─────────────────────────────────────────────
-def _search_by_topic(topic: str, per_page: int = 5) -> list[dict]:
+def _search_by_topic(topic: str, per_page: int = 10) -> list[dict]:
     """
     GitHub topic 태그로 검색 — keyword 검색보다 분류가 정확함
     예: topic:bipedal-robot
@@ -252,7 +252,7 @@ def _search_by_topic(topic: str, per_page: int = 5) -> list[dict]:
 
 
 # ── STEP 2-C: Awesome-list 검색 ──────────────────────────────────────────────
-def _search_awesome_lists(keyword: str, per_page: int = 3) -> list[dict]:
+def _search_awesome_lists(keyword: str, per_page: int = 7) -> list[dict]:
     """
     'awesome + {keyword}' 큐레이션 목록 저장소 검색.
     awesome-list는 사람이 직접 검증한 고품질 링크 모음이라 신뢰도가 높음.
@@ -318,15 +318,6 @@ def _fetch_readme(repo_full_name: str) -> str:
         except Exception:
             return ""
     return content[:3000]
-# ── STEP 3: README 순차 수집 (여기에 들여쓰기를 맞춰서 붙여넣으세요) ──
-    # 한 줄 앞에 공백 4칸(또는 Tab 1번)이 있어야 search_github 함수 소속이 됩니다.
-    pre_sorted = sorted(candidates, key=lambda r: r["stars"], reverse=True)
-    readme_count = min(3, len(pre_sorted)) if api_key else 0
-    top_for_readme = pre_sorted[:readme_count]
-
-    for c in top_for_readme:
-        # _fetch_readme 내부의 _gh_request가 6초 대기를 수행함
-        c["readme"] = _fetch_readme(c["repo"])
 
 # ── STEP 4: 배치 재순위 (핵심 개선) ──────────────────────────────────────────
 def _batch_rerank(candidates: list[dict], user_query: str, api_key: str) -> list[dict]:
@@ -371,7 +362,7 @@ Output ONLY a JSON array in this exact format (no markdown, no explanation):
 
 Include ALL {len(repo_list)} items. Output:"""
 
-    raw = _call_gemini(prompt, api_key, max_tokens=1200)
+    raw = _call_gemini(prompt, api_key, max_tokens=1500)
     if not raw:
         return _star_fallback(candidates)
 
@@ -433,49 +424,38 @@ def search_github(
                 seen_repos.add(r["repo"])
                 candidates.append(r)
 
-    per_kw = max(3, max_results // max(len(keywords), 1))
+    per_kw = max(5, max_results // max(len(keywords), 1))
 
-    # 2-A: 키워드 검색 — 최대 2개로 제한 (rate limit 보호)
-    for kw in keywords[:2]:
-        _add(_search_by_keyword(kw, per_page=5))
-        if len(candidates) >= max_results * 2:
+    # 2-A: 키워드 검색 — 모든 키워드 사용 (pool 확장)
+    for kw in keywords[:5]:
+        _add(_search_by_keyword(kw, per_page=10))
+        if len(candidates) >= max_results * 4:
             break
 
-    # 2-B: GitHub Topics 검색 — 1개만 (정확도 높고 호출 절약)
-    for topic in topics[:1]:
-        _add(_search_by_topic(topic, per_page=5))
+    # 2-B: GitHub Topics 검색 — 최대 3개 (pool 확장)
+    for topic in topics[:3]:
+        _add(_search_by_topic(topic, per_page=10))
 
-    # 2-C: Awesome-list 검색 — 1개만
-    for aw_kw in awesome_kws[:1]:
-        _add(_search_awesome_lists(aw_kw, per_page=3))
+    # 2-C: Awesome-list 검색 — 최대 2개 (pool 확장)
+    for aw_kw in awesome_kws[:2]:
+        _add(_search_awesome_lists(aw_kw, per_page=7))
 
     if not candidates:
         return [{"error": "GitHub 검색 결과가 없습니다."}]
 
-    # ── STEP 3: README 병렬 수집 (상위 3개만 — API 호출 절약 + 속도 향상) ──
-    import concurrent.futures
-
+    # ── STEP 3: README 순차 수집 (API 충돌 방지 — 병렬 처리 제거) ────────────
+    # _gh_request 내부에서 GH_DELAY(6초) 대기를 수행하므로 순차 호출로 충분합니다.
     pre_sorted   = sorted(candidates, key=lambda r: r["stars"], reverse=True)
-    readme_count = min(3, len(pre_sorted)) if api_key else 0  # 3개로 대폭 축소
+    readme_count = min(7, len(pre_sorted)) if api_key else 0   # 상위 7개로 확대
     top_for_readme = pre_sorted[:readme_count]
 
-    def _fetch_and_assign(repo_dict: dict) -> dict:
-        repo_dict["readme"] = _fetch_readme(repo_dict["repo"])
-        return repo_dict
-
-    if top_for_readme:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-            fetched = list(executor.map(_fetch_and_assign, top_for_readme))
-        # candidates 원본에 반영
-        readme_map = {r["repo"]: r["readme"] for r in fetched}
-        for c in candidates:
-            if c["repo"] in readme_map:
-                c["readme"] = readme_map[c["repo"]]
+    for c in top_for_readme:
+        c["readme"] = _fetch_readme(c["repo"])   # 내부에서 자동 delay 수행
 
     # ── STEP 4: 배치 재순위 ──────────────────────────────────────────────────
     if api_key:
-        # readme 있는 상위 15개만 배치 재순위
-        top_candidates = sorted(candidates, key=lambda r: r["stars"], reverse=True)[:10]
+        # 재순위 대상을 20개로 확대 (Gemini 무료 API 1500 토큰 내 처리 가능)
+        top_candidates = sorted(candidates, key=lambda r: r["stars"], reverse=True)[:20]
         rest = [c for c in candidates if c["repo"] not in {r["repo"] for r in top_candidates}]
         top_candidates = _batch_rerank(top_candidates, user_query, api_key)
         # 나머지는 star fallback
@@ -492,4 +472,11 @@ def search_github(
         return (base + bonus, r["stars"])
 
     candidates.sort(key=sort_key, reverse=True)
-    return candidates[:max_results]
+
+    # 적합성 필터: relevance 20점 미만만 제외 (약 80% 통과 기준)
+    # Gemini 무료 API 점수 분포 특성상 20점 이상이면 의미 있는 연관성 보유
+    filtered = [c for c in candidates if c["relevance"] >= 20]
+    if not filtered:
+        filtered = candidates   # 전부 낮으면 필터 무시
+
+    return filtered[:max_results]
