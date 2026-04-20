@@ -582,8 +582,8 @@ elif page == "➕ 저장소 등록":
                 st.markdown(f"**소분류:** {cat['minor']}")
                 st.progress(cat["confidence"] / 100, text=f"신뢰도 {cat['confidence']}%")
 
-            if model_used == "gemini-2.0-flash-lite":
-                st.info("ℹ️ gemini-2.0-flash 할당량 초과 → lite 모델로 폴백")
+            if model_used == "gemini-2.5-flash-lite":
+                st.info("ℹ️ gemini-2.5-flash 할당량 초과 → lite 모델로 폴백")
             elif model_used == "exhausted":
                 st.warning("⚠️ 모든 Gemini 모델 할당량 초과. 키워드 분류 결과입니다.")
 
