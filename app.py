@@ -295,15 +295,20 @@ def render_github_card(item: dict):
   {bar_html}
 </div>"""
 
-    st.components.v1.html(card_html, height=_card_height(relevance, reason, topics_html, bar_html), scrolling=False)
+    st.components.v1.html(card_html, height=_card_height(relevance, reason, topics_html, bar_html, display_sum), scrolling=False)
 
 
-def _card_height(relevance: int, reason: str, topics_html: str, bar_html: str) -> int:
+def _card_height(relevance: int, reason: str, topics_html: str, bar_html: str,
+                 summary: str = "") -> int:
     """카드 내용에 따라 동적으로 높이 계산"""
-    h = 130
-    if reason:       h += 22
-    if topics_html:  h += 28
-    if bar_html:     h += 14
+    h = 155                          # 기본값 130 → 155 (여백 확보)
+    if reason:       h += 26         # 이유 한줄
+    if topics_html:  h += 32         # 토픽 태그 줄
+    if bar_html:     h += 16         # 적합도 바
+    # summary 길이에 따라 추가 높이 (약 40자당 1줄 = 22px)
+    if summary:
+        extra_lines = max(0, len(summary) - 60) // 40
+        h += extra_lines * 22
     return h
 
 
