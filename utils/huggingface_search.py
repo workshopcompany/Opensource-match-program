@@ -188,9 +188,7 @@ def search_huggingface(
                 seen_ids.add(item["id"])
                 spaces_all.append(item)
 
-    # likes 내림차순 정렬
-    models_all.sort(key=lambda x: x["likes"], reverse=True)
-    spaces_all.sort(key=lambda x: x["likes"], reverse=True)
-
-    # Models 먼저, Spaces 뒤에
-    return models_all[:max_models] + spaces_all[:max_spaces]
+    # likes 기준 통합 정렬 (model/space 구분 없이)
+    combined = models_all[:max_models] + spaces_all[:max_spaces]
+    combined.sort(key=lambda x: x["likes"], reverse=True)
+    return combined
