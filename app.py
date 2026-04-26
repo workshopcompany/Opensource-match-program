@@ -8,6 +8,7 @@ from utils.matcher import semantic_score
 from utils.github_fetcher import fetch_repo_info
 from utils.github_search import search_github
 from utils.reddit_search import search_reddit
+from utils.query_expander import build_plan, quality_filter, deduplicate, QUALITY_PRESETS
 
 # ── 상수 ─────────────────────────────────────────────────────────────────────
 GITHUB_USER = "workcompany"
@@ -404,13 +405,21 @@ if page == "🏠 홈 & 검색":
             st.session_state.trigger_search = True
 
     # ── 검색 옵션 + 버튼 ─────────────────────────────────────────────────────
-    col_btn, col_gh, col_rd = st.columns([2, 2, 2])
+    col_btn, col_gh, col_rd, col_q = st.columns([2, 1, 1, 2])
     with col_btn:
         do_search = st.button("🔍 검색", type="primary", use_container_width=True)
     with col_gh:
-        use_github = st.checkbox("GitHub 포함", value=True)
+        use_github = st.checkbox("GitHub", value=True)
     with col_rd:
-        use_reddit = st.checkbox("Reddit 포함", value=True)
+        use_reddit = st.checkbox("Reddit", value=True)
+    with col_q:
+        quality_mode = st.selectbox(
+            "품질 기준",
+            list(QUALITY_PRESETS.keys()),
+            index=1,
+            label_visibility="collapsed",
+            help="★별점·커밋 날짜 기준으로 결과를 필터링합니다",
+        )
 
     # 예시 버튼 클릭 시 자동 검색 트리거
     if st.session_state.trigger_search and query:
@@ -422,18 +431,51 @@ if page == "🏠 홈 & 검색":
         st.session_state.search_results = {}
         st.session_state.last_query = query
 
-    # ── 검색 실행 ────────────────────────────────────────────────────────────
+    # ── 스마트 검색 실행 ────────────────────────────────────────────────────
     if do_search and query:
-        with st.spinner("3가지 소스에서 검색 중..."):
-            db_scored  = sorted(db, key=lambda a: semantic_score(a, query), reverse=True)
-            gh_results = search_github(query, max_results=10,
-                                       use_gemini=bool(os.environ.get("GEMINI_API_KEY"))
-                                       ) if use_github else []
-            rd_results = search_reddit(query, max_results=8) if use_reddit else []
+        # 1단계: 쿼리 확장 플랜 생성
+        plan = build_plan(query, mode=quality_mode)
+
+        # 전략 미리보기
+        if plan.tech_terms:
+            with st.expander("🧠 검색 전략 확인 (클릭)", expanded=False):
+                st.caption(f"**원본 쿼리:** {plan.original}")
+                st.caption(f"**기술 키워드:** {' · '.join(plan.tech_terms[:5])}")
+                st.caption(f"**GitHub 쿼리 {len(plan.github_queries)}개:** "
+                           + " | ".join(f"`{q}`" for q in plan.github_queries[:4]))
+                st.caption(f"**Reddit 쿼리:** "
+                           + " | ".join(f"`{q}`" for q in plan.reddit_queries[:3]))
+                st.caption(f"**전략:** {plan.strategy_note}")
+                st.caption(f"**품질 기준:** ★{plan.quality['min_stars']}+ · "
+                           f"최근 {plan.quality['months']}개월 이내 커밋")
+
+        with st.spinner("🔍 스마트 멀티쿼리 검색 중..."):
+            db_scored = sorted(db, key=lambda a: semantic_score(a, query), reverse=True)
+
+            # GitHub: 다중 쿼리로 검색 후 합치기
+            gh_all: list[dict] = []
+            if use_github:
+                use_gem = bool(os.environ.get("GEMINI_API_KEY"))
+                # 원본 쿼리
+                gh_all += search_github(plan.original, max_results=8, use_gemini=use_gem)
+                # 기술 키워드 쿼리 (최대 2개 추가)
+                for tq in plan.github_queries[1:3]:
+                    gh_all += search_github(tq, max_results=5, use_gemini=False)
+                # 품질 필터 + 중복 제거 + 재정렬
+                gh_all = deduplicate(gh_all)
+                gh_all = quality_filter(gh_all, plan.quality)
+
+            # Reddit: 다중 쿼리
+            rd_all: list[dict] = []
+            if use_reddit:
+                for rq in plan.reddit_queries[:2]:
+                    rd_all += search_reddit(rq, max_results=5)
+                rd_all = deduplicate(rd_all)
 
         st.session_state.search_results = {
-            "db": db_scored, "github": gh_results,
-            "reddit": rd_results, "query": query,
+            "db": db_scored, "github": gh_all,
+            "reddit": rd_all, "query": query,
+            "plan": plan,
         }
 
     # ── 결과 표시 ────────────────────────────────────────────────────────────
@@ -443,6 +485,7 @@ if page == "🏠 홈 & 검색":
         gh_results = cached.get("github", [])
         rd_results = cached.get("reddit", [])
         q_label    = cached.get("query", query)
+        plan       = cached.get("plan", None)
 
         gh_ok = [r for r in gh_results if "error" not in r]
         rd_ok = [r for r in rd_results if "error" not in r]
@@ -466,9 +509,11 @@ if page == "🏠 홈 & 검색":
                 has_gemini_key = bool(os.environ.get("GEMINI_API_KEY"))
                 awesome_count  = sum(1 for r in gh_ok if r.get("is_awesome"))
                 topic_count    = sum(1 for r in gh_ok if r.get("search_source") == "topic")
+                tech_hint = (f" · 기술 키워드: **{', '.join(plan.tech_terms[:3])}**"
+                             if plan and plan.tech_terms else "")
                 st.caption(
                     f"{'🤖 Gemini 쿼리 확장 · ' if has_gemini_key else ''}"
-                    f"키워드 · Topic · Awesome-list 3중 검색 — "
+                    f"🧠 멀티쿼리 스마트 검색{tech_hint} — "
                     f"저장소 **{len(gh_ok)}개** 발견 "
                     f"(Awesome {awesome_count}개 · Topic태그 {topic_count}개 포함)"
                 )
