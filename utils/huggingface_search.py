@@ -157,17 +157,22 @@ def _search_spaces(query: str, limit: int = 5) -> list[dict]:
 def search_huggingface(
     query: str,
     tech_terms: list[str] | None = None,
-    max_models: int = 8,
-    max_spaces: int = 5,
+    max_models: int = 10,
+    max_spaces: int = 8,
 ) -> list[dict]:
     """
     Models + Spaces를 통합 검색 후 likes 기준 정렬.
 
-    tech_terms가 있으면 기술 키워드로도 추가 검색 → 합산 후 중복 제거.
+    핵심 전략:
+    - HuggingFace는 영어 플랫폼 → tech_terms(영어)를 먼저 검색
+    - 한국어 원본 쿼리는 tech_terms 없을 때만 fallback으로 사용
+    - 전체 수집 후 likes 정렬 → 마지막에 슬라이싱 (품질 보장)
     """
-    queries = [query]
+    # HF는 영어 전용 → tech_terms 우선, 원본은 fallback
     if tech_terms:
-        queries += tech_terms[:2]  # 최대 2개 추가 쿼리
+        queries = tech_terms[:3]          # 영어 기술 키워드 최대 3개
+    else:
+        queries = [query]                 # 영어 쿼리거나 tech_terms 없을 때
 
     models_all: list[dict] = []
     spaces_all: list[dict] = []
@@ -188,7 +193,10 @@ def search_huggingface(
                 seen_ids.add(item["id"])
                 spaces_all.append(item)
 
-    # likes 기준 통합 정렬 (model/space 구분 없이)
+    # 전체 정렬 먼저 → 슬라이싱은 마지막에 (품질 높은 순 보장)
+    models_all.sort(key=lambda x: x["likes"], reverse=True)
+    spaces_all.sort(key=lambda x: x["likes"], reverse=True)
+
     combined = models_all[:max_models] + spaces_all[:max_spaces]
     combined.sort(key=lambda x: x["likes"], reverse=True)
     return combined
