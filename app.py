@@ -9,6 +9,7 @@ from utils.github_fetcher import fetch_repo_info
 from utils.github_search import search_github
 from utils.reddit_search import search_reddit
 from utils.query_expander import build_plan, quality_filter, deduplicate, QUALITY_PRESETS
+from utils.huggingface_search import search_huggingface
 
 # ── 상수 ─────────────────────────────────────────────────────────────────────
 GITHUB_USER = "workcompany"
@@ -137,7 +138,7 @@ def cooldown_remaining() -> float:
 
 
 # ── TXT 다운로드 생성 ─────────────────────────────────────────────────────────
-def _results_to_txt(query: str, gh_ok: list, rd_ok: list, db_ok: list) -> str:
+def _results_to_txt(query: str, gh_ok: list, rd_ok: list, db_ok: list, hf_ok: list | None = None) -> str:
     lines = []
     lines.append("=" * 60)
     lines.append(f"OpenSource App Matchmaker — 검색 결과")
@@ -183,6 +184,18 @@ def _results_to_txt(query: str, gh_ok: list, rd_ok: list, db_ok: list) -> str:
             repo = a.get('repo', '')
             if repo:
                 lines.append(f"   🔗 https://github.com/{repo}")
+            lines.append("")
+
+    if hf_ok:
+        lines.append(f"\n[HuggingFace — {len(hf_ok)}개]")
+        lines.append("-" * 40)
+        for i, r in enumerate(hf_ok, 1):
+            kind = "Space" if r.get("type") == "space" else "Model"
+            lines.append(f"{i}. [{kind}] {r.get('id', '')}")
+            lines.append(f"   ❤️ {r.get('likes_fmt','0')} likes  |  {r.get('pipeline_ko') or r.get('sdk','')}")
+            if r.get("summary"):
+                lines.append(f"   {r['summary'][:120]}")
+            lines.append(f"   🔗 {r.get('url', '')}")
             lines.append("")
 
     lines.append("=" * 60)
@@ -343,6 +356,73 @@ def render_reddit_card(item: dict):
     """, unsafe_allow_html=True)
 
 
+def render_hf_card(item: dict):
+    import html as _html
+    is_space  = item.get("type") == "space"
+    bg_color  = "#fffaf0" if is_space else "#f0f7ff"
+    border    = "#fcd34d" if is_space else "#93c5fd"
+    type_label= "🚀 Space (데모)" if is_space else "🤗 Model"
+    type_bg   = "#fef3c7" if is_space else "#dbeafe"
+    type_fg   = "#92400e" if is_space else "#1e40af"
+
+    hf_id    = _html.escape(item.get("id", ""))
+    url      = _html.escape(item.get("url", ""), quote=True)
+    likes    = item.get("likes_fmt", "0")
+    modified = item.get("modified", "")
+    summary  = _html.escape(item.get("summary", "") or "")
+    sdk      = item.get("sdk", "")
+
+    # 파이프라인 / 태스크
+    pipeline_ko = item.get("pipeline_ko") or item.get("pipeline", "")
+    pipeline_html = (
+        f'<span style="font-size:10px;padding:1px 8px;border-radius:10px;'
+        f'background:#e0e7ff;color:#3730a3;margin-left:4px">{_html.escape(pipeline_ko)}</span>'
+    ) if pipeline_ko else ""
+
+    # 라이브러리 태그 (모델만)
+    lib_tags = item.get("lib_tags", [])
+    lib_html = "".join(
+        f'<span style="font-size:10px;padding:1px 7px;border-radius:10px;'
+        f'background:#dcfce7;color:#166534;margin-right:3px">{_html.escape(t)}</span>'
+        for t in lib_tags
+    )
+
+    # SDK 태그 (Space만)
+    sdk_html = (
+        f'<span style="font-size:10px;padding:1px 7px;border-radius:10px;'
+        f'background:#f3e8ff;color:#6b21a8;margin-right:3px">{_html.escape(sdk)}</span>'
+    ) if sdk else ""
+
+    # downloads (모델만)
+    dl = item.get("downloads_fmt", "")
+    dl_html = f'<span style="font-size:11px;color:#6b7280">⬇ {dl}</span>' if dl else ""
+
+    card_html = f"""
+<div style="border:1px solid {border};border-radius:12px;padding:1rem 1.2rem;
+            margin-bottom:0.7rem;background:{bg_color};font-family:sans-serif">
+  <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px">
+    <div>
+      <span style="display:inline-block;font-size:10px;padding:1px 7px;border-radius:10px;
+                   background:{type_bg};color:{type_fg};font-weight:500">{type_label}</span>
+      {pipeline_html}
+      <a href="{url}" target="_blank"
+         style="display:block;font-size:14px;font-weight:600;color:#111827;
+                text-decoration:none;margin-top:4px">
+        {hf_id} ↗
+      </a>
+    </div>
+    <div style="text-align:right">
+      <div style="font-size:13px;font-weight:600;color:#374151">❤️ {likes}</div>
+      {dl_html}
+      <div style="font-size:10px;color:#9ca3af;margin-top:2px">수정: {modified}</div>
+    </div>
+  </div>
+  {'<div style="font-size:13px;color:#374151;line-height:1.5;margin-bottom:8px">' + summary + '</div>' if summary else ''}
+  {lib_html}{sdk_html}
+</div>"""
+    st.components.v1.html(card_html, height=165 + (40 if summary else 0) + (20 if lib_tags or sdk else 0), scrolling=False)
+
+
 # ── 사이드바 ─────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("### 🔍 App Matchmaker")
@@ -472,10 +552,18 @@ if page == "🏠 홈 & 검색":
                     rd_all += search_reddit(rq, max_results=5)
                 rd_all = deduplicate(rd_all)
 
+            # HuggingFace: Models + Spaces
+            hf_all = search_huggingface(
+                plan.original,
+                tech_terms=plan.tech_terms,
+                max_models=8,
+                max_spaces=5,
+            )
+
         st.session_state.search_results = {
             "db": db_scored, "github": gh_all,
-            "reddit": rd_all, "query": query,
-            "plan": plan,
+            "reddit": rd_all, "hf": hf_all,
+            "query": query, "plan": plan,
         }
 
     # ── 결과 표시 ────────────────────────────────────────────────────────────
@@ -484,16 +572,19 @@ if page == "🏠 홈 & 검색":
         db_scored  = cached.get("db", [])
         gh_results = cached.get("github", [])
         rd_results = cached.get("reddit", [])
+        hf_results = cached.get("hf", [])
         q_label    = cached.get("query", query)
         plan       = cached.get("plan", None)
 
         gh_ok = [r for r in gh_results if "error" not in r]
         rd_ok = [r for r in rd_results if "error" not in r]
+        hf_ok = [r for r in hf_results if "error" not in r]
         db_ok = [a for a in db_scored if semantic_score(a, q_label) > 0]
 
         # ── 탭 ───────────────────────────────────────────────────────────────
-        tab_gh, tab_rd, tab_db = st.tabs([
+        tab_gh, tab_hf, tab_rd, tab_db = st.tabs([
             f"🐙 GitHub ({len(gh_ok)}개)",
+            f"🤗 HuggingFace ({len(hf_ok)}개)",
             f"🟠 Reddit ({len(rd_ok)}개)",
             f"📋 내 DB ({len(db_ok)}개)",
         ])
@@ -540,6 +631,22 @@ if page == "🏠 홈 & 검색":
                             st.success(f"'{info['name']}' 등록 완료!")
                             st.rerun()
 
+        # ── HuggingFace 탭 ───────────────────────────────────────────────────
+        with tab_hf:
+            if not hf_ok:
+                st.warning("HuggingFace 검색 결과가 없습니다.")
+            else:
+                model_cnt = sum(1 for r in hf_ok if r.get("type") == "model")
+                space_cnt = sum(1 for r in hf_ok if r.get("type") == "space")
+                tech_hint = (f" · 기술 키워드: **{', '.join(plan.tech_terms[:2])}**"
+                             if plan and plan.tech_terms else "")
+                st.caption(
+                    f"🤗 HuggingFace{tech_hint} — "
+                    f"모델 **{model_cnt}개** · 데모 Space **{space_cnt}개** 발견"
+                )
+                for item in hf_ok:
+                    render_hf_card(item)
+
         # ── Reddit 탭 ────────────────────────────────────────────────────────
         with tab_rd:
             if not use_reddit:
@@ -565,9 +672,9 @@ if page == "🏠 홈 & 검색":
 
         # ── 전체 결과 TXT 다운로드 ───────────────────────────────────────────
         st.divider()
-        total = len(gh_ok) + len(rd_ok) + len(db_ok)
+        total = len(gh_ok) + len(rd_ok) + len(hf_ok) + len(db_ok)
         if total > 0:
-            txt_content = _results_to_txt(q_label, gh_ok, rd_ok, db_ok)
+            txt_content = _results_to_txt(q_label, gh_ok, rd_ok, db_ok, hf_ok)
             safe_q = "".join(c if c.isalnum() or c in "-_ " else "_" for c in q_label)[:30].strip()
             import datetime
             fname = f"search_{safe_q}_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}.txt"
