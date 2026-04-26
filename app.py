@@ -537,10 +537,10 @@ if page == "🏠 홈 & 검색":
             if use_github:
                 use_gem = bool(os.environ.get("GEMINI_API_KEY"))
                 # 원본 쿼리
-                gh_all += search_github(plan.original, max_results=8, use_gemini=use_gem)
+                gh_all += search_github(plan.original, max_results=10, use_gemini=use_gem)
                 # 기술 키워드 쿼리 (최대 2개 추가)
                 for tq in plan.github_queries[1:3]:
-                    gh_all += search_github(tq, max_results=5, use_gemini=False)
+                    gh_all += search_github(tq, max_results=8, use_gemini=False)
                 # 품질 필터 + 중복 제거 + 재정렬
                 gh_all = deduplicate(gh_all)
                 gh_all = quality_filter(gh_all, plan.quality)
@@ -549,15 +549,15 @@ if page == "🏠 홈 & 검색":
             rd_all: list[dict] = []
             if use_reddit:
                 for rq in plan.reddit_queries[:2]:
-                    rd_all += search_reddit(rq, max_results=5)
+                    rd_all += search_reddit(rq, max_results=8)
                 rd_all = deduplicate(rd_all)
 
-            # HuggingFace: Models + Spaces
+            # HuggingFace: Models + Spaces — likes 기준 통합 정렬
             hf_all = search_huggingface(
                 plan.original,
                 tech_terms=plan.tech_terms,
-                max_models=8,
-                max_spaces=5,
+                max_models=10,
+                max_spaces=8,
             )
 
         st.session_state.search_results = {
@@ -642,10 +642,36 @@ if page == "🏠 홈 & 검색":
                              if plan and plan.tech_terms else "")
                 st.caption(
                     f"🤗 HuggingFace{tech_hint} — "
-                    f"모델 **{model_cnt}개** · 데모 Space **{space_cnt}개** 발견"
+                    f"모델 **{model_cnt}개** · 데모 Space **{space_cnt}개** | ❤️ likes 순 통합 정렬"
                 )
-                for item in hf_ok:
+                # likes 기준 통합 정렬 (model/space 구분 없이)
+                hf_sorted = sorted(hf_ok, key=lambda x: x.get("likes", 0), reverse=True)
+                for item in hf_sorted[:15]:
                     render_hf_card(item)
+                    # DB 등록 버튼 (HF 항목용)
+                    hf_id   = item.get("id", "")
+                    hf_type = item.get("type", "model")
+                    already = any(a.get("repo") == f"hf:{hf_id}" for a in db)
+                    if not already:
+                        if st.button(f"+ DB에 등록", key=f"hf_add_{hf_id}"):
+                            pipeline_ko = item.get("pipeline_ko") or item.get("pipeline", "")
+                            db.append({
+                                "id":        len(db) + 1,
+                                "name":      hf_id.split("/")[-1],
+                                "repo":      f"hf:{hf_id}",
+                                "owner":     hf_id.split("/")[0] if "/" in hf_id else "",
+                                "summary":   item.get("summary") or f"HuggingFace {hf_type}: {pipeline_ko}",
+                                "cat_major": "AI / ML",
+                                "cat_mid":   pipeline_ko or hf_type,
+                                "cat_minor": item.get("sdk", "") or "",
+                                "lang":      "Python",
+                                "stars":     item.get("likes", 0),
+                                "tags":      item.get("lib_tags", []) + item.get("tags", [])[:3],
+                                "has_readme": False,
+                            })
+                            save_db(db)
+                            st.success(f"'{hf_id}' 등록 완료!")
+                            st.rerun()
 
         # ── Reddit 탭 ────────────────────────────────────────────────────────
         with tab_rd:
